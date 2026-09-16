@@ -1,0 +1,16 @@
+{
+  "name": "VibeLib - 전남대학교 도서관 AI 큐레이터",
+  "short_name": "VibeLib",
+  "description": "전남대학교 도서관 소장 도서 목차 및 평점 기반 AI 스마트 큐레이션",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#006B3F",
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "64x64 32x32 24x24 16x16",
+      "type": "image/x-icon"
+    }
+  ]
+}
