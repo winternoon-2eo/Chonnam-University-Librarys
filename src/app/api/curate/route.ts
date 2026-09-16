@@ -115,21 +115,21 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // 4. Smart Screening: Select up to 30 books (10 newest 2025~2026 + 20 top relevant/available)
+    // 4. Smart Screening: Select up to 15 books (5 newest 2025~2026 + 10 top relevant/available)
     const sortedByYear = [...cnuCandidates].sort((a, b) => {
       const yearA = parseInt(a.pubYear, 10) || 0;
       const yearB = parseInt(b.pubYear, 10) || 0;
       return yearB - yearA;
     });
 
-    const newestCandidates = sortedByYear.slice(0, 10);
+    const newestCandidates = sortedByYear.slice(0, 5);
     const newestSet = new Set(newestCandidates.map((c) => c.controlNo));
 
     const remainingCandidates = cnuCandidates.filter((c) => !newestSet.has(c.controlNo));
     // Prioritize available books in the remaining pool
     remainingCandidates.sort((a, b) => (b.isAvailable ? 1 : 0) - (a.isAvailable ? 1 : 0));
 
-    const screenedCnuList = [...newestCandidates, ...remainingCandidates.slice(0, 20)];
+    const screenedCnuList = [...newestCandidates, ...remainingCandidates.slice(0, 10)];
 
     // 5. Batch-controlled Concurrency Enrichment (Layer 2 Defense: Prevents 429 rate limit & protects metadata)
     const enrichedCandidates: RawCandidateBook[] = [];

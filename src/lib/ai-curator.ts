@@ -149,22 +149,22 @@ export async function analyzeAndExpandQuery(
  */
 export function screenCandidatePool(
   candidates: RawCandidateBook[],
-  maxPool = 30
+  maxPool = 15
 ): RawCandidateBook[] {
   if (candidates.length <= maxPool) {
     return candidates;
   }
 
-  // 1. Sort by recency to pick newest 10 (2025~2026)
+  // 1. Sort by recency to pick newest 5 (2025~2026)
   const sortedByYear = [...candidates].sort((a, b) => {
     const yearA = parseInt(a.cnu.pubYear, 10) || 0;
     const yearB = parseInt(b.cnu.pubYear, 10) || 0;
     return yearB - yearA;
   });
-  const newest = sortedByYear.slice(0, 10);
+  const newest = sortedByYear.slice(0, 5);
   const selectedControlNos = new Set<string>(newest.map((c) => c.cnu.controlNo));
 
-  // 2. Sort remaining by salesPoint and rating to pick 20 popular
+  // 2. Sort remaining by salesPoint and rating to pick 10 popular
   const remaining = candidates.filter((c) => !selectedControlNos.has(c.cnu.controlNo));
   remaining.sort((a, b) => {
     const scoreA = (a.aladin.salesPoint || 0) + (a.aladin.rating || 0) * 1000;

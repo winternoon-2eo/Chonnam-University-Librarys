@@ -137,7 +137,7 @@ export default function HomePage() {
             <div className="text-xs text-muted-foreground">
               {searchMeta.totalHarvested && searchMeta.totalHarvested > 0 ? (
                 <span>
-                  소장 도서 <strong>{searchMeta.totalHarvested}권</strong> 대량 탐색 ➔ 최신·인기 <strong>{searchMeta.screenedCount || 30}권</strong> 스크리닝
+                  소장 도서 <strong>{searchMeta.totalHarvested}권</strong> 대량 탐색 ➔ 최신·인기 <strong>{searchMeta.screenedCount || 15}권</strong> 스크리닝
                 </span>
               ) : searchMeta.cached ? (
                 <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400">

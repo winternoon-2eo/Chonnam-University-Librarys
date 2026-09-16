@@ -49,7 +49,7 @@ export async function fetchYes24Ranking(
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         'Referer': `https://www.yes24.com/product/goods/${goodsNo}`,
       },
-      signal: AbortSignal.timeout(4000),
+      signal: AbortSignal.timeout(2500),
       next: { revalidate: 86400 },
     });
 
@@ -81,7 +81,7 @@ export async function fetchYes24Reviews(goodsNo: string): Promise<Yes24Review[]>
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         'Referer': `https://www.yes24.com/product/goods/${goodsNo}`,
       },
-      signal: AbortSignal.timeout(4000),
+      signal: AbortSignal.timeout(2500),
       next: { revalidate: 86400 },
     });
 
@@ -137,7 +137,7 @@ export async function fetchYes24BookInfo(isbn: string, fallbackTitle = ''): Prom
         'X-Api-Key': apiKey,
         'Accept': 'application/json',
       },
-      signal: AbortSignal.timeout(6000), // 6 second resilient timeout
+      signal: AbortSignal.timeout(3000), // 3 second fast timeout
       next: { revalidate: 86400 }, // Cache for 24 hours
     });
 
