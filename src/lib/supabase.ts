@@ -106,12 +106,73 @@ export async function setCachedCurateResult(
           query_key: cacheKey,
           query,
           intent,
+          recommended_titles: (data || []).map((b: any) => b.title),
           data,
           updated_at: new Date().toISOString(),
         }),
       });
     } catch (err) {
       console.warn('[Supabase Cache] Upsert failed:', err);
+    }
+  }
+}
+
+export interface SearchLogItem {
+  id?: string;
+  query: string;
+  intent: 'beginner' | 'practical';
+  campus: string;
+  recommended_titles: string[];
+  created_at?: string;
+}
+
+const memorySearchLogs: SearchLogItem[] = [];
+
+/**
+ * Record user search query and the 5 recommended book titles to Supabase & memory
+ */
+export async function recordSearchLog(
+  query: string,
+  intent: 'beginner' | 'practical',
+  campus: string,
+  books: { title: string }[]
+): Promise<void> {
+  const titles = (books || []).map((b) => b.title).filter(Boolean);
+  const logItem: SearchLogItem = {
+    query: query.trim(),
+    intent,
+    campus,
+    recommended_titles: titles,
+    created_at: new Date().toISOString(),
+  };
+
+  // 1. In-memory log (for 0-config dev)
+  memorySearchLogs.push(logItem);
+  if (memorySearchLogs.length > 500) memorySearchLogs.shift();
+
+  // 2. Supabase persistent table: `search_logs`
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (supabaseUrl && supabaseKey) {
+    try {
+      await fetch(`${supabaseUrl}/rest/v1/search_logs`, {
+        method: 'POST',
+        headers: {
+          apikey: supabaseKey,
+          Authorization: `Bearer ${supabaseKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          query: logItem.query,
+          intent: logItem.intent,
+          campus: logItem.campus,
+          recommended_titles: logItem.recommended_titles,
+          created_at: logItem.created_at,
+        }),
+      });
+    } catch (err) {
+      console.warn('[Supabase SearchLog] Failed saving search log:', err);
     }
   }
 }

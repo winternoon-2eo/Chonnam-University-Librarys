@@ -15,7 +15,7 @@ import {
   enforceAvailabilityRatio,
   RawCandidateBook,
 } from '@/lib/ai-curator';
-import { getCachedCurateResult, setCachedCurateResult } from '@/lib/supabase';
+import { getCachedCurateResult, setCachedCurateResult, recordSearchLog } from '@/lib/supabase';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -68,6 +68,10 @@ async function processCurateRequest(
       if (availableOnly) {
         filteredBooks = cachedData.filter((b) => b.status === 'AVAILABLE');
       }
+
+      // Record search query and recommended book titles to Supabase
+      recordSearchLog(query, intent, campus, filteredBooks).catch(() => {});
+
       return NextResponse.json({
         searchMeta: {
           query,
@@ -266,6 +270,9 @@ async function processCurateRequest(
     if (availableOnly) {
       resultBooks = guaranteedBooks.filter((b) => b.status === 'AVAILABLE');
     }
+
+    // Record search query and recommended book titles to Supabase
+    recordSearchLog(query, intent, campus, resultBooks).catch(() => {});
 
     return NextResponse.json({
       searchMeta: {
