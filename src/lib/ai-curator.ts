@@ -1,6 +1,7 @@
 import { CnuBookSearchResult } from './cnu-library';
 import { BookstoreMetadata } from './bookstore';
 import { Yes24Review } from './yes24';
+import { callGeminiWithPool } from './gemini-pool';
 
 export interface RawCandidateBook {
   cnu: CnuBookSearchResult;
@@ -288,8 +289,8 @@ export async function analyzeAndExpandQuery(
   const matchedKnowledge = DOMAIN_KNOWLEDGE_MAP[cleanQ];
   if (matchedKnowledge) {
     Object.assign(defaultResult, matchedKnowledge);
+    return defaultResult; // Skip Gemini API when domain knowledge is already registered
   }
-
 
   const geminiApiKey = process.env.GEMINI_API_KEY;
   if (!geminiApiKey || !cleanQ) {
@@ -297,7 +298,6 @@ export async function analyzeAndExpandQuery(
   }
 
   try {
-    const model = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
     const prompt = `
 당신은 전남대학교 도서관 검색 시스템의 'AI 쿼리 분석 및 확장 엔진'입니다.
 사용자가 입력한 검색어는 특정 소설가/학자/인물명(예: "한강", "유발 하라리"), 거대 주제(예: "자기계발", "경영학"), 오탈자(예: "클롣" -> "클로드"), 구어체/자연어(예: "코딩 공부"), 특정 도구명(예: "옵시디언")일 수 있습니다.
@@ -324,41 +324,27 @@ export async function analyzeAndExpandQuery(
 }
 `;
 
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: {
-            responseMimeType: 'application/json',
-            temperature: 0.1,
-          },
-        }),
-      }
-    );
+    const geminiRes = await callGeminiWithPool(prompt, {
+      temperature: 0.1,
+      responseMimeType: 'application/json',
+    });
 
-    if (res.ok) {
-      const json = await res.json();
-      const text = json.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (text) {
-        const parsed = JSON.parse(text);
-        return {
-          originalQuery: cleanQ,
-          correctedQuery: parsed.correctedQuery || cleanQ,
-          isTypo: Boolean(parsed.isTypo),
-          searchKeywords:
-            Array.isArray(parsed.searchKeywords) && parsed.searchKeywords.length > 0
-              ? parsed.searchKeywords.slice(0, 3)
-              : [parsed.correctedQuery || cleanQ],
-          callNumberPrefixes:
-            Array.isArray(parsed.callNumberPrefixes) && parsed.callNumberPrefixes.length > 0
-              ? parsed.callNumberPrefixes.slice(0, 2)
-              : defaultResult.callNumberPrefixes,
-          explanation: parsed.explanation || defaultResult.explanation || '',
-        };
-      }
+    if (geminiRes.ok && geminiRes.text) {
+      const parsed = JSON.parse(geminiRes.text);
+      return {
+        originalQuery: cleanQ,
+        correctedQuery: parsed.correctedQuery || cleanQ,
+        isTypo: Boolean(parsed.isTypo),
+        searchKeywords:
+          Array.isArray(parsed.searchKeywords) && parsed.searchKeywords.length > 0
+            ? parsed.searchKeywords.slice(0, 3)
+            : [parsed.correctedQuery || cleanQ],
+        callNumberPrefixes:
+          Array.isArray(parsed.callNumberPrefixes) && parsed.callNumberPrefixes.length > 0
+            ? parsed.callNumberPrefixes.slice(0, 2)
+            : defaultResult.callNumberPrefixes,
+        explanation: parsed.explanation || defaultResult.explanation || '',
+      };
     }
   } catch (err) {
     console.warn('[AI Curator] Query expansion error:', err);
@@ -533,40 +519,25 @@ export async function curateTop5Books(
     return [];
   }
 
-  // 1. If Gemini API key is present, run real LLM Curation on the real library holdings
+  // 1. If Gemini API key is present, run real LLM Curation on the real library holdings via Option B Pool
   const geminiApiKey = process.env.GEMINI_API_KEY;
   if (geminiApiKey) {
     try {
-      const model = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
       const prompt = buildCurationPrompt(query, intent, candidates, rankOffset);
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: {
-              responseMimeType: 'application/json',
-              temperature: 0.3,
-            },
-          }),
-        }
-      );
+      const geminiRes = await callGeminiWithPool(prompt, {
+        temperature: 0.2,
+        responseMimeType: 'application/json',
+      });
 
-      if (res.ok) {
-        const json = await res.json();
-        const rawResponseText = json.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (rawResponseText) {
-          const parsedAi = JSON.parse(rawResponseText);
-          if (Array.isArray(parsedAi) && parsedAi.length > 0) {
-            const rawItems = mapAiResultsToCuratedItems(parsedAi, candidates, rankOffset);
-            return enforceAvailabilityRatio(rawItems, candidates, rankOffset);
-          }
+      if (geminiRes.ok && geminiRes.text) {
+        const parsedAi = JSON.parse(geminiRes.text);
+        if (Array.isArray(parsedAi) && parsedAi.length > 0) {
+          const rawItems = mapAiResultsToCuratedItems(parsedAi, candidates, rankOffset);
+          return enforceAvailabilityRatio(rawItems, candidates, rankOffset);
         }
       }
     } catch (err) {
-      console.warn('[AI Curator] Gemini API failed, falling back to heuristic curation:', err);
+      console.warn('[AI Curator] Gemini Pool failed, falling back to heuristic curation:', err);
     }
   }
 
@@ -669,6 +640,50 @@ function mapAiResultsToCuratedItems(
   }
 
   return results;
+}
+
+/**
+ * Sanitize TOC text and extract a concise, clean chapter title (max 40 chars)
+ * Completely eliminates raw HTML tags, &lt;/br&gt; entities, and long walls of text.
+ */
+export function extractCleanChapter(rawToc: string): string {
+  if (!rawToc || typeof rawToc !== 'string') {
+    return '제1장 핵심 기초와 적용 전략';
+  }
+
+  // 1. Replace all HTML line breaks and entities
+  const decoded = rawToc
+    .replace(/&lt;\s*\/?\s*br\s*\/?\s*&gt;/gi, '\n')
+    .replace(/<\s*\/?\s*br\s*\/?\s*>/gi, '\n')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/<[^>]+>/g, ' ');
+
+  // 2. Split by newlines and clean lines
+  const lines = decoded
+    .split(/[\r\n]+/)
+    .map((l) => l.trim())
+    .filter((l) => l.length >= 3);
+
+  if (lines.length === 0) {
+    return '제1장 핵심 기초와 적용 전략';
+  }
+
+  // 3. Prefer a line that looks like a chapter/part heading
+  const chapterLine = lines.find((l) =>
+    /^(chapter\s*\d+|part\s*\d+|제\s*\d+\s*[장부편]|\d+\s*[장부]|프롤로그)/i.test(l) && l.length <= 60
+  );
+
+  let candidate = chapterLine || lines[Math.min(1, lines.length - 1)];
+  candidate = candidate.replace(/[\[\]]/g, '').trim();
+  if (candidate.length > 40) {
+    candidate = candidate.slice(0, 37) + '...';
+  }
+
+  return candidate || '제1장 핵심 기초와 적용 전략';
 }
 
 /**
@@ -782,8 +797,7 @@ function fallbackHeuristicCuration(
     else if (item.cnu.isAvailable) badge = '✅ 즉시 대출가능';
     else badge = '📚 핵심 필독서';
 
-    const lines = (bs?.toc || '').split('\n').filter(Boolean);
-    const targetChapter = lines[Math.min(2, lines.length - 1)] || '제1장 핵심 기초와 적용 전략';
+    const targetChapter = extractCleanChapter(bs?.toc || '');
 
     let recommendReason = '';
     const isLiteratureOrAuthor = /한강|소설|문학|시|에세이|작가/i.test(query);
@@ -849,8 +863,15 @@ function formatCuratedItem(
     callNumber: cnu.callNumber || '005.1 C623',
     location: cnu.location || '중앙도서관[본관] 1자료실',
     status: cnu.isAvailable ? 'AVAILABLE' : 'CHECKED_OUT',
-    returnDueDate: cnu.statusText.includes('반납예정') ? cnu.statusText : undefined,
-    toc: bookstore?.toc || '',
+    toc: (bookstore?.toc || '')
+      .replace(/&lt;\s*\/?\s*br\s*\/?\s*&gt;/gi, '\n')
+      .replace(/<\s*\/?\s*br\s*\/?\s*>/gi, '\n')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .trim(),
     aiCuration: ai,
     links: {
       cnuDetailUrl: cnu.cnuDetailUrl,
