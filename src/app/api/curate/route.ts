@@ -30,6 +30,7 @@ export async function GET(request: NextRequest) {
   const intent = (searchParams.get('intent') || 'beginner') as 'beginner' | 'practical';
   const campus = (searchParams.get('campus') || 'gwangju') as CampusType;
   const availableOnly = searchParams.get('availableOnly') === 'true';
+  const forceRefresh = searchParams.get('refresh') === 'true';
 
   if (!query) {
     return NextResponse.json(
@@ -38,13 +39,13 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  const flightKey = `${query.toLowerCase()}_${intent}_${campus}_${availableOnly}`;
+  const flightKey = `${query.toLowerCase()}_${intent}_${campus}_${availableOnly}_${forceRefresh}`;
   const existingFlight = inFlightRequests.get(flightKey);
   if (existingFlight) {
     return existingFlight.then((res) => res.clone());
   }
 
-  const executionPromise = processCurateRequest(query, intent, campus, availableOnly);
+  const executionPromise = processCurateRequest(query, intent, campus, availableOnly, forceRefresh);
   inFlightRequests.set(flightKey, executionPromise);
 
   try {
@@ -58,31 +59,34 @@ async function processCurateRequest(
   query: string,
   intent: 'beginner' | 'practical',
   campus: CampusType,
-  availableOnly: boolean
+  availableOnly: boolean,
+  forceRefresh = false
 ): Promise<NextResponse> {
   try {
     // 1. Check 2-tier cache (with campus awareness)
-    const cachedData = await getCachedCurateResult(query, intent, campus);
-    if (cachedData && Array.isArray(cachedData) && cachedData.length > 0) {
-      let filteredBooks = cachedData;
-      if (availableOnly) {
-        filteredBooks = cachedData.filter((b) => b.status === 'AVAILABLE');
+    if (!forceRefresh) {
+      const cachedData = await getCachedCurateResult(query, intent, campus);
+      if (cachedData && Array.isArray(cachedData) && cachedData.length > 0) {
+        let filteredBooks = cachedData;
+        if (availableOnly) {
+          filteredBooks = cachedData.filter((b) => b.status === 'AVAILABLE');
+        }
+
+        // Record search query and recommended book titles to Supabase
+        recordSearchLog(query, intent, campus, filteredBooks).catch(() => {});
+
+        return NextResponse.json({
+          searchMeta: {
+            query,
+            intent,
+            campus,
+            cached: true,
+            total: filteredBooks.length,
+            source: 'cache',
+          },
+          books: filteredBooks,
+        });
       }
-
-      // Record search query and recommended book titles to Supabase
-      recordSearchLog(query, intent, campus, filteredBooks).catch(() => {});
-
-      return NextResponse.json({
-        searchMeta: {
-          query,
-          intent,
-          campus,
-          cached: true,
-          total: filteredBooks.length,
-          source: 'cache',
-        },
-        books: filteredBooks,
-      });
     }
 
     // 2. AI Query Rewriting & Call Number (DDC/KDC) Classification Expansion
