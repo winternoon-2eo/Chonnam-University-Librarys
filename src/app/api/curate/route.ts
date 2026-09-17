@@ -142,21 +142,31 @@ async function processCurateRequest(
       });
     }
 
-    // 4. Smart Screening: Select up to 15 books (5 newest 2025~2026 + 10 top relevant/available)
-    const sortedByYear = [...cnuCandidates].sort((a, b) => {
-      const yearA = parseInt(a.pubYear, 10) || 0;
-      const yearB = parseInt(b.pubYear, 10) || 0;
-      return yearB - yearA;
+    // 4. Smart Screening: Select up to 15 books prioritizing author matches, keyword title matches, availability, and recency
+    const scoredCandidates = cnuCandidates.map((cand) => {
+      let score = 0;
+      const title = (cand.title || '').toLowerCase();
+      const author = (cand.author || '').toLowerCase();
+      const cleanQ = queryAnalysis.correctedQuery.toLowerCase();
+
+      // Author match or keyword match (Crucial for authors like "한강")
+      if (author.includes(cleanQ)) score += 100;
+      if (queryAnalysis.searchKeywords.some((kw) => title.includes(kw.toLowerCase()))) score += 60;
+      if (title.includes(cleanQ)) score += 30;
+
+      // Available bonus
+      if (cand.isAvailable) score += 20;
+
+      // Recency bonus
+      const year = parseInt(cand.pubYear, 10) || 2000;
+      if (year >= 2024) score += 15;
+      else if (year >= 2020) score += 10;
+
+      return { cand, score, year };
     });
 
-    const newestCandidates = sortedByYear.slice(0, 5);
-    const newestSet = new Set(newestCandidates.map((c) => c.controlNo));
-
-    const remainingCandidates = cnuCandidates.filter((c) => !newestSet.has(c.controlNo));
-    // Prioritize available books in the remaining pool
-    remainingCandidates.sort((a, b) => (b.isAvailable ? 1 : 0) - (a.isAvailable ? 1 : 0));
-
-    const screenedCnuList = [...newestCandidates, ...remainingCandidates.slice(0, 10)];
+    scoredCandidates.sort((a, b) => b.score - a.score || b.year - a.year);
+    const screenedCnuList = scoredCandidates.slice(0, 15).map((s) => s.cand);
 
     // 5. Phase 1 Fast Enrichment: Basic metadata without reviews/ranking scraping (~1.2s total)
     const enrichedCandidates: RawCandidateBook[] = [];
