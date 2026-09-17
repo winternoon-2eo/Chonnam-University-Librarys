@@ -1,11 +1,11 @@
-import { AladinBookInfo } from './aladin';
 import { CnuBookSearchResult } from './cnu-library';
 import { BookstoreMetadata } from './bookstore';
 import { Yes24Review } from './yes24';
 
 export interface RawCandidateBook {
   cnu: CnuBookSearchResult;
-  aladin: BookstoreMetadata | AladinBookInfo;
+  bookstore: BookstoreMetadata;
+  aladin?: BookstoreMetadata; // backward compatibility alias
 }
 
 export interface CuratedBookItem {
@@ -385,8 +385,10 @@ export function screenCandidatePool(
       canonicalMap.set(key, cand);
     } else {
       // If new candidate has higher salesPoint, or is available while existing is checked out, keep the better one
-      const candScore = (cand.aladin.salesPoint || 0) + (cand.cnu.isAvailable ? 5000 : 0);
-      const existScore = (existing.aladin.salesPoint || 0) + (existing.cnu.isAvailable ? 5000 : 0);
+      const candBs = cand.bookstore || cand.aladin;
+      const existBs = existing.bookstore || existing.aladin;
+      const candScore = (candBs?.salesPoint || 0) + (cand.cnu.isAvailable ? 5000 : 0);
+      const existScore = (existBs?.salesPoint || 0) + (existing.cnu.isAvailable ? 5000 : 0);
       if (candScore > existScore) {
         canonicalMap.set(key, cand);
       }
@@ -410,8 +412,10 @@ export function screenCandidatePool(
   // 2. Sort remaining by salesPoint and rating to pick 10 popular
   const remaining = deduplicatedCandidates.filter((c) => !selectedControlNos.has(c.cnu.controlNo));
   remaining.sort((a, b) => {
-    const scoreA = (a.aladin.salesPoint || 0) + (a.aladin.rating || 0) * 1000;
-    const scoreB = (b.aladin.salesPoint || 0) + (b.aladin.rating || 0) * 1000;
+    const aBs = a.bookstore || a.aladin;
+    const bBs = b.bookstore || b.aladin;
+    const scoreA = (aBs?.salesPoint || 0) + (aBs?.rating || 0) * 1000;
+    const scoreB = (bBs?.salesPoint || 0) + (bBs?.rating || 0) * 1000;
     return scoreB - scoreA;
   });
 
@@ -426,7 +430,8 @@ export function screenCandidatePool(
  */
 export function enforceAvailabilityRatio(
   curatedItems: CuratedBookItem[],
-  allCandidates: RawCandidateBook[]
+  allCandidates: RawCandidateBook[],
+  rankOffset = 0
 ): CuratedBookItem[] {
   // 1. Deduplicate curatedItems by canonical work key
   const deduplicatedItems: CuratedBookItem[] = [];
@@ -446,9 +451,10 @@ export function enforceAvailabilityRatio(
       const key = getBookCanonicalKey(cand.cnu.title, cand.cnu.author);
       if (!seenCanonicalKeys.has(key)) {
         seenCanonicalKeys.add(key);
+        const candBs = cand.bookstore || cand.aladin;
         deduplicatedItems.push(
-          formatCuratedItem(cand, deduplicatedItems.length + 1, {
-            badge: cand.aladin.rankingBadge?.isBest ? cand.aladin.rankingBadge.rankingText : '⭐ 추천 도서',
+          formatCuratedItem(cand, rankOffset + deduplicatedItems.length + 1, {
+            badge: candBs?.rankingBadge?.isBest ? candBs.rankingBadge.rankingText : '⭐ 추천 도서',
             recommendReason: `${cand.cnu.author} 저자의 대표작으로, 탄탄한 완성도와 실용성을 겸비한 전남대 소장 도서입니다.`,
             targetChapter: '제1장 핵심 기초와 적용 전략',
             solvedProblems: [
@@ -469,7 +475,7 @@ export function enforceAvailabilityRatio(
 
   // If checked out items <= 2, requirement is strictly satisfied!
   if (checkedOutItems.length <= 2) {
-    return deduplicatedItems.slice(0, 5).map((item, idx) => ({ ...item, rank: idx + 1 }));
+    return deduplicatedItems.slice(0, 5).map((item, idx) => ({ ...item, rank: rankOffset + idx + 1 }));
   }
 
   // Keep top 2 checked-out items, replace 3rd+ with available candidates (checking canonical keys)
@@ -509,7 +515,7 @@ export function enforceAvailabilityRatio(
 
   return merged.map((item, idx) => ({
     ...item,
-    rank: idx + 1,
+    rank: rankOffset + idx + 1,
   }));
 }
 
@@ -519,7 +525,8 @@ export function enforceAvailabilityRatio(
 export async function curateTop5Books(
   query: string,
   intent: 'beginner' | 'practical',
-  candidates: RawCandidateBook[]
+  candidates: RawCandidateBook[],
+  rankOffset = 0
 ): Promise<CuratedBookItem[]> {
   // Strict Ground Truth Gate: If no candidate books were found in CNU library, never fabricate books.
   if (!candidates || candidates.length === 0) {
@@ -531,7 +538,7 @@ export async function curateTop5Books(
   if (geminiApiKey) {
     try {
       const model = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
-      const prompt = buildCurationPrompt(query, intent, candidates);
+      const prompt = buildCurationPrompt(query, intent, candidates, rankOffset);
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`,
         {
@@ -553,8 +560,8 @@ export async function curateTop5Books(
         if (rawResponseText) {
           const parsedAi = JSON.parse(rawResponseText);
           if (Array.isArray(parsedAi) && parsedAi.length > 0) {
-            const rawItems = mapAiResultsToCuratedItems(parsedAi, candidates);
-            return enforceAvailabilityRatio(rawItems, candidates);
+            const rawItems = mapAiResultsToCuratedItems(parsedAi, candidates, rankOffset);
+            return enforceAvailabilityRatio(rawItems, candidates, rankOffset);
           }
         }
       }
@@ -564,33 +571,40 @@ export async function curateTop5Books(
   }
 
   // 2. Deterministic heuristic ranking on the ACTUAL candidates (no fabrication)
-  return enforceAvailabilityRatio(fallbackHeuristicCuration(query, intent, candidates), candidates);
+  return enforceAvailabilityRatio(fallbackHeuristicCuration(query, intent, candidates, rankOffset), candidates, rankOffset);
 }
 
 function buildCurationPrompt(
   query: string,
   intent: 'beginner' | 'practical',
-  candidates: RawCandidateBook[]
+  candidates: RawCandidateBook[],
+  rankOffset = 0
 ): string {
   const intentDescription =
     intent === 'beginner'
       ? '🌱 입문/교양 (비전공자도 이해하기 쉬운 개념 설명, 기초 원리, 친근한 비유, 가독성 높은 구성)'
       : '⚡ 실습/실무 (현업 및 과제에 즉시 적용 가능한 구체적 예제, 행동 프레임워크, 최신 트렌드, 심화 테크닉)';
 
-  const booksSummary = candidates.map((c, idx) => ({
-    index: idx,
-    title: c.cnu.title,
-    author: c.cnu.author,
-    publisher: c.cnu.publisher,
-    pubYear: c.cnu.pubYear,
-    rating: c.aladin.rating,
-    salesPoint: c.aladin.salesPoint,
-    toc: c.aladin.toc.substring(0, 450),
-  }));
+  const booksSummary = candidates.map((c, idx) => {
+    const bs = c.bookstore || c.aladin;
+    return {
+      index: idx,
+      title: c.cnu.title,
+      author: c.cnu.author,
+      publisher: c.cnu.publisher,
+      pubYear: c.cnu.pubYear,
+      rating: bs?.rating || 9.2,
+      salesPoint: bs?.salesPoint || 12000,
+      toc: (bs?.toc || '').substring(0, 450),
+    };
+  });
+
+  const startRank = rankOffset + 1;
+  const endRank = rankOffset + 5;
 
   return `
 당신은 전남대학교 도서관의 수석 AI 큐레이터 'VibeLib'입니다.
-도서관의 단순 키워드 검색 결과에서 제목만 비슷한 책들을 솎아내고, [상세 목차(TOC)], [출판연도], [출판사], [저자 전문성]을 분석하여 사용자 학습 목적에 가장 완벽히 부합하는 최상위 5권을 선별하고 순위를 매겨주세요.
+도서관의 단순 키워드 검색 결과에서 제목만 비슷한 책들을 솎아내고, [상세 목차(TOC)], [출판연도], [출판사], [저자 전문성]을 분석하여 사용자 학습 목적에 가장 완벽히 부합하는 ${rankOffset > 0 ? `다음 5권(순위 ${startRank}~${endRank}위)` : '최상위 5권'}을 선별하고 순위를 매겨주세요.
 
 [사용자 검색어]: "${query}"
 [사용자 학습 목적]: ${intentDescription}
@@ -611,7 +625,7 @@ ${JSON.stringify(booksSummary, null, 2)}
 [
   {
     "index": number (선택한 후보 도서의 index),
-    "rank": number (1~5),
+    "rank": number (${startRank}~${endRank}),
     "badge": string (도서의 공인 특성. 예: "🌱 입문 최우수", "⚡ 실무 필독 1위", "⭐ 독자평점 9.8", "💡 2025 최신작". 가상의 'YES24 분야 베스트'나 'MIT 명강의' 같은 허위 수식어는 절대 금지),
     "recommendReason": string (목차 내용과 구성을 바탕으로 왜 이 책이 사용자 목적에 최적인지 2~3문장으로 설득력 있는 추천 사유),
     "targetChapter": string (목차 중 학생이 가장 먼저 30분 만에 읽어야 할 핵심 챕터명),
@@ -626,7 +640,8 @@ ${JSON.stringify(booksSummary, null, 2)}
 
 function mapAiResultsToCuratedItems(
   aiResults: any[],
-  candidates: RawCandidateBook[]
+  candidates: RawCandidateBook[],
+  rankOffset = 0
 ): CuratedBookItem[] {
   const results: CuratedBookItem[] = [];
   const seenCanonicalKeys = new Set<string>();
@@ -640,7 +655,7 @@ function mapAiResultsToCuratedItems(
     if (seenCanonicalKeys.has(key)) continue;
     seenCanonicalKeys.add(key);
 
-    results.push(formatCuratedItem(candidate, results.length + 1, {
+    results.push(formatCuratedItem(candidate, rankOffset + results.length + 1, {
       recommendReason: aiItem.recommendReason,
       targetChapter: aiItem.targetChapter,
       badge: aiItem.badge,
@@ -662,20 +677,22 @@ function mapAiResultsToCuratedItems(
 function fallbackHeuristicCuration(
   query: string,
   intent: 'beginner' | 'practical',
-  candidates: RawCandidateBook[]
+  candidates: RawCandidateBook[],
+  rankOffset = 0
 ): CuratedBookItem[] {
   // Sort candidates by relevance and bestseller proof
   const scored = candidates.map((item) => {
-    let score = (item.aladin.rating || 9.0) * 10;
+    const bs = item.bookstore || item.aladin;
+    let score = (bs?.rating || 9.0) * 10;
 
     // YES24 SalesPoint weighting (Bestsellers & Steadysellers get massive boost)
-    const salesPoint = item.aladin.salesPoint || 0;
+    const salesPoint = bs?.salesPoint || 0;
     if (salesPoint >= 50000) score += 60; // Mega bestseller (e.g. 한강 소설)
     else if (salesPoint >= 20000) score += 40;
     else if (salesPoint >= 10000) score += 20;
 
     // Official Bestseller Ranking Badge bonus
-    if (item.aladin.rankingBadge?.isBest) {
+    if (bs?.rankingBadge?.isBest) {
       score += 40;
     }
 
@@ -697,7 +714,7 @@ function fallbackHeuristicCuration(
     const year = parseInt(item.cnu.pubYear, 10) || 2020;
     if (year >= 2024) score += 5;
 
-    const toc = (item.aladin.toc || '').toLowerCase();
+    const toc = (bs?.toc || '').toLowerCase();
     const title = (item.cnu.title || '').toLowerCase();
 
     if (intent === 'beginner') {
@@ -752,16 +769,20 @@ function fallbackHeuristicCuration(
 
   return distinctScored.map((entry, idx) => {
     const { item } = entry;
-    const rank = idx + 1;
+    const rank = rankOffset + idx + 1;
+    const bs = item.bookstore || item.aladin;
 
     let badge = '🏆 추천 도서';
-    if (item.aladin.rankingBadge?.isBest) badge = item.aladin.rankingBadge.rankingText;
+    if (bs?.rankingBadge?.isBest) badge = bs.rankingBadge.rankingText;
     else if (rank === 1) badge = intent === 'beginner' ? '🌱 입문 최우수' : '⚡ 실전 필독 1위';
-    else if (item.aladin.rating >= 9.5) badge = `⭐ 평점 ${item.aladin.rating}점`;
+    else if (rank === 6) badge = '✨ 주목할 추천작';
+    else if (rank === 11) badge = '💡 깊이 있는 심화서';
+    else if (rank === 16) badge = '📖 서가 속 숨은 명저';
+    else if (bs?.rating && bs.rating >= 9.5) badge = `⭐ 평점 ${bs.rating}점`;
     else if (item.cnu.isAvailable) badge = '✅ 즉시 대출가능';
     else badge = '📚 핵심 필독서';
 
-    const lines = (item.aladin.toc || '').split('\n').filter(Boolean);
+    const lines = (bs?.toc || '').split('\n').filter(Boolean);
     const targetChapter = lines[Math.min(2, lines.length - 1)] || '제1장 핵심 기초와 적용 전략';
 
     let recommendReason = '';
@@ -807,10 +828,10 @@ function formatCuratedItem(
   }
 ): CuratedBookItem {
   const cnu = candidate.cnu;
-  const aladin = candidate.aladin;
-  const cleanIsbn = aladin.isbn || cnu.isbn || '9791100000000';
-  const rankingBadge = (aladin as BookstoreMetadata).rankingBadge;
-  const reviews = (aladin as BookstoreMetadata).reviews;
+  const bookstore = candidate.bookstore || candidate.aladin;
+  const cleanIsbn = bookstore?.isbn || cnu.isbn || '9791100000000';
+  const rankingBadge = bookstore?.rankingBadge;
+  const reviews = bookstore?.reviews;
 
   return {
     rank,
@@ -820,16 +841,16 @@ function formatCuratedItem(
     author: cnu.author,
     publisher: cnu.publisher,
     pubYear: cnu.pubYear,
-    coverUrl: aladin.coverUrl || cnu.coverUrl,
-    rating: aladin.rating,
-    salesPoint: aladin.salesPoint,
+    coverUrl: bookstore?.coverUrl || cnu.coverUrl,
+    rating: bookstore?.rating || 9.2,
+    salesPoint: bookstore?.salesPoint || 12000,
     rankingBadge,
     reviews,
     callNumber: cnu.callNumber || '005.1 C623',
     location: cnu.location || '중앙도서관[본관] 1자료실',
     status: cnu.isAvailable ? 'AVAILABLE' : 'CHECKED_OUT',
     returnDueDate: cnu.statusText.includes('반납예정') ? cnu.statusText : undefined,
-    toc: aladin.toc,
+    toc: bookstore?.toc || '',
     aiCuration: ai,
     links: {
       cnuDetailUrl: cnu.cnuDetailUrl,

@@ -13,6 +13,7 @@ import {
   curateTop5Books,
   analyzeAndExpandQuery,
   enforceAvailabilityRatio,
+  getBookCanonicalKey,
   RawCandidateBook,
 } from '@/lib/ai-curator';
 import { getCachedCurateResult, setCachedCurateResult, recordSearchLog } from '@/lib/supabase';
@@ -21,8 +22,42 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 // Layer 2 Defense: SingleFlight Request Coalescing
-// Prevents duplicate queries (e.g. 50 students searching "경영학" simultaneously) from hammering external APIs
+// Prevents duplicate queries from hammering external APIs simultaneously
 const inFlightRequests = new Map<string, Promise<NextResponse>>();
+
+// In-memory Harvest Cache (10 minutes) to eliminate redundant OPAC crawling for page 2, 3, 4
+interface HarvestCacheEntry {
+  candidates: CnuBookSearchResult[];
+  queryAnalysis: any;
+  timestamp: number;
+}
+const harvestCache = new Map<string, HarvestCacheEntry>();
+
+// Layer 3 Concurrency Semaphore: Max 5 concurrent live harvest/curation pipelines
+let activeLivePipelines = 0;
+const MAX_CONCURRENT_LIVE_PIPELINES = 5;
+const waitQueue: Array<() => void> = [];
+
+async function acquirePipelineSlot(): Promise<void> {
+  if (activeLivePipelines < MAX_CONCURRENT_LIVE_PIPELINES) {
+    activeLivePipelines++;
+    return;
+  }
+  return new Promise<void>((resolve) => {
+    waitQueue.push(() => {
+      activeLivePipelines++;
+      resolve();
+    });
+  });
+}
+
+function releasePipelineSlot(): void {
+  activeLivePipelines = Math.max(0, activeLivePipelines - 1);
+  const next = waitQueue.shift();
+  if (next) {
+    next();
+  }
+}
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
@@ -31,6 +66,9 @@ export async function GET(request: NextRequest) {
   const campus = (searchParams.get('campus') || 'gwangju') as CampusType;
   const availableOnly = searchParams.get('availableOnly') === 'true';
   const forceRefresh = searchParams.get('refresh') === 'true';
+  const page = Math.max(1, Math.min(4, parseInt(searchParams.get('page') || '1', 10) || 1));
+  const excludeIdsRaw = searchParams.get('excludeIds') || '';
+  const excludeIds = excludeIdsRaw ? excludeIdsRaw.split(',').map((s) => s.trim()).filter(Boolean) : [];
 
   if (!query) {
     return NextResponse.json(
@@ -39,13 +77,21 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  const flightKey = `${query.toLowerCase()}_${intent}_${campus}_${availableOnly}_${forceRefresh}`;
+  const flightKey = `${query.toLowerCase()}_${intent}_${campus}_${page}_${availableOnly}_${forceRefresh}_${excludeIds.sort().join('_')}`;
   const existingFlight = inFlightRequests.get(flightKey);
   if (existingFlight) {
     return existingFlight.then((res) => res.clone());
   }
 
-  const executionPromise = processCurateRequest(query, intent, campus, availableOnly, forceRefresh);
+  const executionPromise = processCurateRequest(
+    query,
+    intent,
+    campus,
+    availableOnly,
+    forceRefresh,
+    page,
+    excludeIds
+  );
   inFlightRequests.set(flightKey, executionPromise);
 
   try {
@@ -60,9 +106,14 @@ async function processCurateRequest(
   intent: 'beginner' | 'practical',
   campus: CampusType,
   availableOnly: boolean,
-  forceRefresh = false
+  forceRefresh = false,
+  page = 1,
+  excludeIds: string[] = []
 ): Promise<NextResponse> {
   try {
+    const pageSize = 5;
+    const startIndex = (page - 1) * pageSize;
+
     // 1. Check 2-tier cache (with campus awareness)
     if (!forceRefresh) {
       const cachedData = await getCachedCurateResult(query, intent, campus);
@@ -72,230 +123,325 @@ async function processCurateRequest(
           filteredBooks = cachedData.filter((b) => b.status === 'AVAILABLE');
         }
 
-        // Record search query and recommended book titles to Supabase
-        recordSearchLog(query, intent, campus, filteredBooks).catch(() => {});
+        const pageBooks = filteredBooks.slice(startIndex, startIndex + pageSize);
 
+        // If the cache already has enough books for this page, return immediately!
+        if (pageBooks.length > 0) {
+          recordSearchLog(query, intent, campus, pageBooks).catch(() => {});
+
+          return NextResponse.json({
+            searchMeta: {
+              query,
+              intent,
+              campus,
+              cached: true,
+              total: pageBooks.length,
+              source: 'cache',
+              pagination: {
+                page,
+                limit: pageSize,
+                hasMore: startIndex + pageSize < Math.min(20, filteredBooks.length),
+                currentCount: pageBooks.length,
+                totalCuratedInCache: filteredBooks.length,
+                maxBooks: 20,
+              },
+            },
+            books: pageBooks,
+          });
+        }
+      }
+    }
+
+    // 2. Acquire concurrency slot to protect university library server
+    await acquirePipelineSlot();
+
+    try {
+      const harvestKey = `${query.toLowerCase()}_${campus}`;
+      let cnuCandidates: CnuBookSearchResult[] = [];
+      let queryAnalysis: any = null;
+
+      const harvestEntry = harvestCache.get(harvestKey);
+      if (harvestEntry && !forceRefresh && Date.now() - harvestEntry.timestamp < 10 * 60 * 1000) {
+        cnuCandidates = harvestEntry.candidates;
+        queryAnalysis = harvestEntry.queryAnalysis;
+      } else {
+        // AI Query Rewriting & Call Number (DDC/KDC) Classification Expansion
+        queryAnalysis = await analyzeAndExpandQuery(query, intent);
+
+        // Hybrid Multi-Angle Harvesting: Keywords + Same-Shelf Call Numbers
+        const kwPromises = queryAnalysis.searchKeywords.map((kw: string) =>
+          searchCnuLibrary(kw, { campus, cpp: 50, pageCount: 2, maxResults: 50 })
+        );
+
+        const callNoPromises = (queryAnalysis.callNumberPrefixes || []).map((prefix: string) =>
+          searchCnuLibraryByCallNo(prefix, { campus, cpp: 50, maxResults: 30 })
+        );
+
+        const [kwBatches, callNoBatches] = await Promise.all([
+          Promise.all(kwPromises),
+          Promise.all(callNoPromises),
+        ]);
+
+        const seenControlNos = new Set<string>();
+        for (const batch of [...kwBatches, ...callNoBatches]) {
+          for (const item of batch) {
+            if (!seenControlNos.has(item.controlNo)) {
+              seenControlNos.add(item.controlNo);
+              cnuCandidates.push(item);
+            }
+          }
+        }
+
+        if (cnuCandidates.length === 0) {
+          const rawCandidates = await searchCnuLibrary(query, { campus, cpp: 50, pageCount: 1, maxResults: 30 });
+          for (const item of rawCandidates) {
+            if (!seenControlNos.has(item.controlNo)) {
+              seenControlNos.add(item.controlNo);
+              cnuCandidates.push(item);
+            }
+          }
+        }
+
+        harvestCache.set(harvestKey, {
+          candidates: cnuCandidates,
+          queryAnalysis,
+          timestamp: Date.now(),
+        });
+      }
+
+      if (cnuCandidates.length === 0) {
         return NextResponse.json({
           searchMeta: {
             query,
+            correctedQuery: queryAnalysis?.correctedQuery || query,
+            isTypo: queryAnalysis?.isTypo || false,
+            searchKeywords: queryAnalysis?.searchKeywords || [query],
+            callNumberPrefixes: queryAnalysis?.callNumberPrefixes || [],
+            queryExplanation: queryAnalysis?.explanation || '',
             intent,
             campus,
-            cached: true,
-            total: filteredBooks.length,
-            source: 'cache',
+            cached: false,
+            total: 0,
+            source: 'cnu-library-zero-match',
+            pagination: {
+              page,
+              limit: pageSize,
+              hasMore: false,
+              currentCount: 0,
+              maxBooks: 20,
+            },
           },
-          books: filteredBooks,
+          books: [],
         });
       }
-    }
 
-    // 2. AI Query Rewriting & Call Number (DDC/KDC) Classification Expansion
-    const queryAnalysis = await analyzeAndExpandQuery(query, intent);
+      // 3. Smart Screening: Prioritize author matches, keyword title matches, availability, and recency
+      const scoredCandidates = cnuCandidates.map((cand) => {
+        let score = 0;
+        const title = (cand.title || '').toLowerCase();
+        const author = (cand.author || '').toLowerCase();
+        const cleanQ = (queryAnalysis?.correctedQuery || query).toLowerCase();
 
-    // 3. Hybrid Multi-Angle Harvesting: Keywords + Same-Shelf Call Numbers
-    const kwPromises = queryAnalysis.searchKeywords.map((kw) =>
-      searchCnuLibrary(kw, { campus, cpp: 50, pageCount: 2, maxResults: 50 })
-    );
+        if (author.includes(cleanQ)) score += 100;
+        if (queryAnalysis?.searchKeywords?.some((kw: string) => title.includes(kw.toLowerCase()))) score += 60;
+        if (title.includes(cleanQ)) score += 30;
+        if (cand.isAvailable) score += 20;
 
-    const callNoPromises = (queryAnalysis.callNumberPrefixes || []).map((prefix) =>
-      searchCnuLibraryByCallNo(prefix, { campus, cpp: 50, maxResults: 30 })
-    );
+        const year = parseInt(cand.pubYear, 10) || 2000;
+        if (year >= 2024) score += 15;
+        else if (year >= 2020) score += 10;
 
-    const [kwBatches, callNoBatches] = await Promise.all([
-      Promise.all(kwPromises),
-      Promise.all(callNoPromises),
-    ]);
-
-    // Flatten and deduplicate candidates by controlNo
-    const seenControlNos = new Set<string>();
-    const cnuCandidates: CnuBookSearchResult[] = [];
-
-    for (const batch of [...kwBatches, ...callNoBatches]) {
-      for (const item of batch) {
-        if (!seenControlNos.has(item.controlNo)) {
-          seenControlNos.add(item.controlNo);
-          cnuCandidates.push(item);
-        }
-      }
-    }
-
-    // Fallback: If 0 books found, try raw query search directly
-    if (cnuCandidates.length === 0) {
-      const rawCandidates = await searchCnuLibrary(query, { campus, cpp: 50, pageCount: 1, maxResults: 30 });
-      for (const item of rawCandidates) {
-        if (!seenControlNos.has(item.controlNo)) {
-          seenControlNos.add(item.controlNo);
-          cnuCandidates.push(item);
-        }
-      }
-    }
-
-    // Strict Ground Truth Gate: If no books exist in CNU library, return empty honestly
-    if (cnuCandidates.length === 0) {
-      return NextResponse.json({
-        searchMeta: {
-          query,
-          correctedQuery: queryAnalysis.correctedQuery,
-          isTypo: queryAnalysis.isTypo,
-          searchKeywords: queryAnalysis.searchKeywords,
-          callNumberPrefixes: queryAnalysis.callNumberPrefixes,
-          queryExplanation: queryAnalysis.explanation,
-          intent,
-          campus,
-          cached: false,
-          total: 0,
-          source: 'cnu-library-zero-match',
-        },
-        books: [],
+        return { cand, score, year };
       });
-    }
 
-    // 4. Smart Screening: Select up to 15 books prioritizing author matches, keyword title matches, availability, and recency
-    const scoredCandidates = cnuCandidates.map((cand) => {
-      let score = 0;
-      const title = (cand.title || '').toLowerCase();
-      const author = (cand.author || '').toLowerCase();
-      const cleanQ = queryAnalysis.correctedQuery.toLowerCase();
+      scoredCandidates.sort((a, b) => b.score - a.score || b.year - a.year);
 
-      // Author match or keyword match (Crucial for authors like "한강")
-      if (author.includes(cleanQ)) score += 100;
-      if (queryAnalysis.searchKeywords.some((kw) => title.includes(kw.toLowerCase()))) score += 60;
-      if (title.includes(cleanQ)) score += 30;
+      // Filter out books already delivered in previous pages (excludeIds and existing cached books)
+      const existingCachedForFilter = (await getCachedCurateResult(query, intent, campus)) || [];
+      const excludeSet = new Set<string>([
+        ...excludeIds,
+        ...existingCachedForFilter.map((b: any) => b.id),
+      ]);
+      const existingCanonicalKeys = new Set<string>(
+        existingCachedForFilter.map((b: any) => getBookCanonicalKey(b.title, b.author))
+      );
 
-      // Available bonus
-      if (cand.isAvailable) score += 20;
+      const availableCandidates = scoredCandidates.filter((s) => {
+        if (excludeSet.has(s.cand.controlNo)) return false;
+        const key = getBookCanonicalKey(s.cand.title, s.cand.author);
+        return !existingCanonicalKeys.has(key);
+      });
 
-      // Recency bonus
-      const year = parseInt(cand.pubYear, 10) || 2000;
-      if (year >= 2024) score += 15;
-      else if (year >= 2020) score += 10;
+      // Select top 15 candidate books for this page
+      const screenedCnuList = availableCandidates.slice(0, 15).map((s) => s.cand);
 
-      return { cand, score, year };
-    });
+      if (screenedCnuList.length === 0) {
+        return NextResponse.json({
+          searchMeta: {
+            query,
+            correctedQuery: queryAnalysis?.correctedQuery || query,
+            intent,
+            campus,
+            cached: false,
+            total: 0,
+            source: 'cnu-exhausted',
+            pagination: {
+              page,
+              limit: pageSize,
+              hasMore: false,
+              currentCount: 0,
+              maxBooks: 20,
+            },
+          },
+          books: [],
+        });
+      }
 
-    scoredCandidates.sort((a, b) => b.score - a.score || b.year - a.year);
-    const screenedCnuList = scoredCandidates.slice(0, 15).map((s) => s.cand);
+      // 4. Phase 1 Fast Enrichment: YES24 metadata (~1.0s total)
+      const enrichedCandidates: RawCandidateBook[] = [];
+      const BATCH_SIZE = 5;
+      const DELAY_MS = 20;
 
-    // 5. Phase 1 Fast Enrichment: Basic metadata without reviews/ranking scraping (~1.2s total)
-    const enrichedCandidates: RawCandidateBook[] = [];
-    const BATCH_SIZE = 5;
-    const DELAY_MS = 30;
+      for (let i = 0; i < screenedCnuList.length; i += BATCH_SIZE) {
+        const batch = screenedCnuList.slice(i, i + BATCH_SIZE);
+        const batchResults = await Promise.all(
+          batch.map(async (cnuItem) => {
+            try {
+              const bookstoreInfo = await fetchUnifiedBookMetadata(cnuItem.isbn || '', cnuItem.title, false).catch(() => null);
 
-    for (let i = 0; i < screenedCnuList.length; i += BATCH_SIZE) {
-      const batch = screenedCnuList.slice(i, i + BATCH_SIZE);
-      const batchResults = await Promise.all(
-        batch.map(async (cnuItem) => {
+              const finalBookstore = bookstoreInfo || {
+                isbn: cnuItem.isbn || '',
+                title: cnuItem.title,
+                author: cnuItem.author,
+                publisher: cnuItem.publisher,
+                coverUrl: cnuItem.coverUrl,
+                rating: 9.5,
+                salesPoint: 20000,
+                toc: '',
+                description: '',
+                source: 'cnu-fallback' as const,
+              };
+
+              return {
+                cnu: cnuItem,
+                bookstore: finalBookstore,
+                aladin: finalBookstore,
+              } as RawCandidateBook;
+            } catch (err) {
+              console.warn(`[Curate API] Failed enriching book ${cnuItem.controlNo}:`, err);
+              return null;
+            }
+          })
+        );
+
+        for (const res of batchResults) {
+          if (res) enrichedCandidates.push(res);
+        }
+
+        if (i + BATCH_SIZE < screenedCnuList.length) {
+          await new Promise((resolve) => setTimeout(resolve, DELAY_MS));
+        }
+      }
+
+      const rankOffset = (page - 1) * pageSize;
+
+      // 5. Run AI Curation with Availability Ratio Guarantee & rankOffset
+      const top5Books = await curateTop5Books(
+        queryAnalysis?.correctedQuery || query,
+        intent,
+        enrichedCandidates,
+        rankOffset
+      );
+
+      // 6. Phase 2 Targeted Deep Enrichment: Parallelize detail & official ranking/reviews for Top 5 ONLY (~0.8s)
+      const finalizedTop5 = await Promise.all(
+        top5Books.map(async (book) => {
           try {
-            const bookstoreInfo = await fetchUnifiedBookMetadata(cnuItem.isbn || '', cnuItem.title, false).catch(() => null);
+            const matchingCand = enrichedCandidates.find((c) => c.cnu.controlNo === book.id);
+            const bookstore = matchingCand?.bookstore || matchingCand?.aladin;
+            const goodsNo = (bookstore as BookstoreMetadata)?.goodsNo;
 
-            const finalBookstore = bookstoreInfo || {
-              isbn: cnuItem.isbn || '',
-              title: cnuItem.title,
-              author: cnuItem.author,
-              publisher: cnuItem.publisher,
-              coverUrl: cnuItem.coverUrl,
-              rating: 9.5,
-              salesPoint: 20000,
-              toc: '',
-              description: '',
-              source: 'cnu-fallback' as const,
-            };
+            const [cnuDetailRes, yes24CommRes] = await Promise.allSettled([
+              getCnuBookDetail(book.id, campus),
+              goodsNo ? enrichBookWithYes24Community(goodsNo) : Promise.resolve(null),
+            ]);
 
-            return {
-              cnu: cnuItem,
-              aladin: finalBookstore,
-            } as RawCandidateBook;
-          } catch (err) {
-            console.warn(`[Curate API] Failed enriching book ${cnuItem.controlNo}:`, err);
-            return null;
+            const updated = { ...book };
+
+            if (cnuDetailRes.status === 'fulfilled' && cnuDetailRes.value) {
+              const d = cnuDetailRes.value;
+              if (d.location) updated.location = d.location;
+              if (d.callNumber) updated.callNumber = d.callNumber;
+              if (d.isAvailable !== undefined) {
+                updated.status = d.isAvailable ? 'AVAILABLE' : 'CHECKED_OUT';
+              }
+            }
+
+            if (yes24CommRes.status === 'fulfilled' && yes24CommRes.value) {
+              const comm = yes24CommRes.value;
+              if (comm?.rankingBadge) updated.rankingBadge = comm.rankingBadge;
+              if (comm?.reviews && comm.reviews.length > 0) updated.reviews = comm.reviews;
+            }
+
+            return updated;
+          } catch {
+            return book;
           }
         })
       );
 
-      for (const res of batchResults) {
-        if (res) enrichedCandidates.push(res);
-      }
+      const guaranteedBooks = enforceAvailabilityRatio(finalizedTop5, enrichedCandidates, rankOffset);
 
-      if (i + BATCH_SIZE < screenedCnuList.length) {
-        await new Promise((resolve) => setTimeout(resolve, DELAY_MS));
-      }
-    }
-
-    // 6. Run AI Curation with Availability Ratio Guarantee (min 3 available, max 2 checked-out)
-    const top5Books = await curateTop5Books(
-      queryAnalysis.correctedQuery,
-      intent,
-      enrichedCandidates
-    );
-
-    // 7. Phase 2 Targeted Deep Enrichment: Parallelize detail & official ranking/reviews for Top 5 ONLY (~0.8s)
-    const finalizedTop5 = await Promise.all(
-      top5Books.map(async (book) => {
-        try {
-          const matchingCand = enrichedCandidates.find((c) => c.cnu.controlNo === book.id);
-          const goodsNo = (matchingCand?.aladin as BookstoreMetadata)?.goodsNo;
-
-          const [cnuDetailRes, yes24CommRes] = await Promise.allSettled([
-            getCnuBookDetail(book.id, campus),
-            goodsNo ? enrichBookWithYes24Community(goodsNo) : Promise.resolve(null),
-          ]);
-
-          const updated = { ...book };
-
-          if (cnuDetailRes.status === 'fulfilled' && cnuDetailRes.value) {
-            const d = cnuDetailRes.value;
-            if (d.location) updated.location = d.location;
-            if (d.callNumber) updated.callNumber = d.callNumber;
-            if (d.isAvailable !== undefined) {
-              updated.status = d.isAvailable ? 'AVAILABLE' : 'CHECKED_OUT';
-            }
-          }
-
-          if (yes24CommRes.status === 'fulfilled' && yes24CommRes.value) {
-            const comm = yes24CommRes.value;
-            if (comm?.rankingBadge) updated.rankingBadge = comm.rankingBadge;
-            if (comm?.reviews && comm.reviews.length > 0) updated.reviews = comm.reviews;
-          }
-
-          return updated;
-        } catch {
-          return book;
+      // 7. Store in 2-tier cache (merging with existing cache)
+      const existingCached = (await getCachedCurateResult(query, intent, campus)) || [];
+      const existingIdSet = new Set<string>(existingCached.map((b: any) => b.id));
+      const mergedForCache = [...existingCached];
+      for (const b of guaranteedBooks) {
+        if (!existingIdSet.has(b.id)) {
+          existingIdSet.add(b.id);
+          mergedForCache.push(b);
         }
-      })
-    );
+      }
+      await setCachedCurateResult(query, intent, mergedForCache, campus);
 
-    // Ensure Availability Ratio Guarantee remains strictly applied
-    const guaranteedBooks = enforceAvailabilityRatio(finalizedTop5, enrichedCandidates);
+      let resultBooks = guaranteedBooks;
+      if (availableOnly) {
+        resultBooks = guaranteedBooks.filter((b) => b.status === 'AVAILABLE');
+      }
 
-    // 8. Store in 2-tier cache
-    await setCachedCurateResult(query, intent, guaranteedBooks, campus);
+      recordSearchLog(query, intent, campus, resultBooks).catch(() => {});
 
-    let resultBooks = guaranteedBooks;
-    if (availableOnly) {
-      resultBooks = guaranteedBooks.filter((b) => b.status === 'AVAILABLE');
+      const hasMore = page < 4 && availableCandidates.length > screenedCnuList.length && mergedForCache.length < 20;
+
+      return NextResponse.json({
+        searchMeta: {
+          query,
+          correctedQuery: queryAnalysis?.correctedQuery,
+          isTypo: queryAnalysis?.isTypo,
+          searchKeywords: queryAnalysis?.searchKeywords,
+          callNumberPrefixes: queryAnalysis?.callNumberPrefixes,
+          queryExplanation: queryAnalysis?.explanation,
+          intent,
+          campus,
+          totalHarvested: cnuCandidates.length,
+          screenedCount: enrichedCandidates.length,
+          cached: false,
+          total: resultBooks.length,
+          source: 'live-curation',
+          pagination: {
+            page,
+            limit: pageSize,
+            hasMore,
+            currentCount: resultBooks.length,
+            totalAccumulated: mergedForCache.length,
+            maxBooks: 20,
+          },
+        },
+        books: resultBooks,
+      });
+    } finally {
+      releasePipelineSlot();
     }
-
-    // Record search query and recommended book titles to Supabase
-    recordSearchLog(query, intent, campus, resultBooks).catch(() => {});
-
-    return NextResponse.json({
-      searchMeta: {
-        query,
-        correctedQuery: queryAnalysis.correctedQuery,
-        isTypo: queryAnalysis.isTypo,
-        searchKeywords: queryAnalysis.searchKeywords,
-        callNumberPrefixes: queryAnalysis.callNumberPrefixes,
-        queryExplanation: queryAnalysis.explanation,
-        intent,
-        campus,
-        totalHarvested: cnuCandidates.length,
-        screenedCount: enrichedCandidates.length,
-        cached: false,
-        total: resultBooks.length,
-        source: 'live-curation',
-      },
-      books: resultBooks,
-    });
   } catch (error: any) {
     console.error('[API /curate] Internal error:', error);
     return NextResponse.json(

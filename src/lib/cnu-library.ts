@@ -44,27 +44,62 @@ export interface CnuBookDetail {
   cnuDetailUrl: string;
 }
 
+let globalCnuCookies = '';
+
 /**
- * Resilient HTTP fetcher for CNU Library servers (handles university TLS/keep-alive quirks)
+ * Resilient HTTP fetcher for CNU Library servers (handles university TLS/keep-alive quirks & WAF challenge redirects)
  */
-function fetchHttps(url: string): Promise<{ status: number; data: string }> {
+function fetchHttps(
+  url: string,
+  extraCookie = '',
+  maxRedirects = 3
+): Promise<{ status: number; data: string }> {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
+    const cookieHeader = [globalCnuCookies, extraCookie].filter(Boolean).join('; ');
+
+    const headers: Record<string, string> = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,application/json,*/*;q=0.8',
+      'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+      'Connection': 'close',
+    };
+    if (cookieHeader) {
+      headers['Cookie'] = cookieHeader;
+    }
+
     const options: https.RequestOptions = {
       hostname: parsed.hostname,
       port: parsed.port || 443,
       path: parsed.pathname + parsed.search,
       method: 'GET',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,application/json,*/*;q=0.8',
-        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Connection': 'close',
-      },
+      headers,
       rejectUnauthorized: false,
     };
 
     const req = https.request(options, (res) => {
+      // Capture Set-Cookie headers from CNU Library WAF challenge
+      const rawCookies = res.headers['set-cookie'];
+      let newCookies = '';
+      if (rawCookies && Array.isArray(rawCookies)) {
+        newCookies = rawCookies.map((c) => c.split(';')[0]).join('; ');
+        globalCnuCookies = [globalCnuCookies, newCookies].filter(Boolean).join('; ');
+      }
+
+      // Follow 301, 302, 307, 308 redirects with cookies
+      if (
+        (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307 || res.statusCode === 308) &&
+        res.headers.location &&
+        maxRedirects > 0
+      ) {
+        let redirectUrl = res.headers.location;
+        if (!redirectUrl.startsWith('http')) {
+          redirectUrl = `${parsed.protocol}//${parsed.host}${redirectUrl.startsWith('/') ? '' : '/'}${redirectUrl}`;
+        }
+        res.resume();
+        return fetchHttps(redirectUrl, newCookies, maxRedirects - 1).then(resolve).catch(reject);
+      }
+
       let data = '';
       res.setEncoding('utf8');
       res.on('data', (chunk) => { data += chunk; });
