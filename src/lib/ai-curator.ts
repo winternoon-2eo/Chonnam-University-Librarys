@@ -69,9 +69,9 @@ export function resolveCallNumberPrefixes(query: string): string[] {
   if (/클로드|claude|챗gpt|gpt|ai|인공지능|llm|생성형|머신러닝|딥러닝|프롬프트|에이전트|바이브/i.test(q)) {
     return ['006.3', '005.13'];
   }
-  // 3. 컴퓨터 / 코딩 / 소프트웨어
-  if (/코딩|파이썬|자바|c언어|프로그래밍|개발|알고리즘|자료구조|소프트웨어|스프링|리액트/i.test(q)) {
-    return ['005.1', '005.13'];
+  // 3. 컴퓨터 / 코딩 / 프론트엔드 / 백엔드 / 웹 / 소프트웨어
+  if (/프론트|백엔드|웹|코딩|파이썬|자바|자바스크립트|타입스크립트|리액트|스프링|c언어|프로그래밍|개발|알고리즘|자료구조|소프트웨어|html|css/i.test(q)) {
+    return ['005.13', '005.1'];
   }
   // 4. 지식관리 / 생산성 / 도구
   if (/옵시디언|노션|메모|생산성|지식관리|기록/i.test(q)) {
@@ -130,8 +130,8 @@ export function resolveCallNumberPrefixes(query: string): string[] {
     return ['600', '650'];
   }
 
-  // Broad Academic Fallback: Generalities / Interdisciplinary (never empty!)
-  return ['000', '300'];
+  // Broad Fallback: Computing & General Knowledge
+  return ['005.1'];
 }
 
 /**
@@ -272,6 +272,16 @@ export async function analyzeAndExpandQuery(
       searchKeywords: ['옵시디언', '세컨드 브레인', '제텔카스텐', '생산성'],
       callNumberPrefixes: ['005.5', '005.1'],
       explanation: '지식 관리 및 제텔카스텐/세컨드 브레인 생산성 서가를 함께 탐색합니다.',
+    },
+    '프론트엔드': {
+      searchKeywords: ['프론트엔드', '리액트', '자바스크립트', '웹 프로그래밍', '모던 웹'],
+      callNumberPrefixes: ['005.13', '005.1'],
+      explanation: '전남대 도서관에 소장된 프론트엔드 및 리액트/자바스크립트 최신 개발 서가를 함께 탐색합니다.',
+    },
+    '백엔드': {
+      searchKeywords: ['백엔드', '스프링', '자바', '서버 개발', '시스템 아키텍처'],
+      callNumberPrefixes: ['005.13', '005.1'],
+      explanation: '전남대 도서관에 소장된 백엔드 및 서버/스프링 아키텍처 서가를 함께 탐색합니다.',
     },
   };
 
