@@ -176,19 +176,22 @@ export async function searchCnuLibrary(
   const {
     campus = 'gwangju',
     maxResults = 50,
-    fromYear = 2022,
+    fromYear = 0,
     cpp = 50,
     pageCount = 2,
-  } = options;
+    searchField = 'TOTAL',
+  } = options as any;
 
   try {
     const campusParam = campus === 'yeosu' ? '&bk_2=jttjvyjttj' : '';
     const cleanQ = query.trim();
     if (!cleanQ) return [];
 
+    const siParam = searchField === 'AUTHOR' ? '&si=2' : '&si=TOTAL';
+    const yearFilter = fromYear > 0 ? `&bk_rf=${fromYear}` : '';
     const pagePromises: Promise<CnuBookSearchResult[]>[] = [];
     for (let p = 1; p <= pageCount; p++) {
-      const searchUrl = `https://lib.jnu.ac.kr/search/tot/result?pn=${p}&st=KWRD&si=TOTAL&q=${encodeURIComponent(cleanQ)}&bk_0=jttjmjttj&bk_rf=${fromYear}&cpp=${cpp}${campusParam}`;
+      const searchUrl = `https://lib.jnu.ac.kr/search/tot/result?pn=${p}&st=KWRD${siParam}&q=${encodeURIComponent(cleanQ)}&bk_0=jttjmjttj${yearFilter}&cpp=${cpp}${campusParam}`;
       pagePromises.push(
         fetchWithRetry(searchUrl, 2)
           .then((res) => (res.status === 200 ? parseSearchResultHtml(res.data, campus) : []))

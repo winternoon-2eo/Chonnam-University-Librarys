@@ -74,6 +74,41 @@ export async function analyzeAndExpandQuery(
     explanation: '',
   };
 
+  // Deterministic Domain & Author Knowledge Map (Prevents degradation on Gemini 429 rate limit)
+  const DOMAIN_KNOWLEDGE_MAP: Record<string, Partial<QueryAnalysisResult>> = {
+    '한강': {
+      correctedQuery: '한강',
+      searchKeywords: ['한강', '소년이 온다', '작별하지 않는다', '채식주의자'],
+      callNumberPrefixes: ['813'],
+      explanation: '소설가 한강의 문학 세계를 대표하는 주요 작품 서가를 함께 안내합니다.',
+    },
+    '김영하': {
+      correctedQuery: '김영하',
+      searchKeywords: ['김영하', '살인자의 기억법', '작별인사', '여행의 이유'],
+      callNumberPrefixes: ['813'],
+      explanation: '소설가 김영하의 대표 장편소설 및 산문 서가를 함께 탐색합니다.',
+    },
+    '유발 하라리': {
+      correctedQuery: '유발 하라리',
+      searchKeywords: ['유발 하라리', '사피엔스', '호모 데우스', '넥서스'],
+      callNumberPrefixes: ['909', '303'],
+      explanation: '인류학 및 문명사 분야를 대표하는 유발 하라리의 저작을 안내합니다.',
+    },
+    '글쓰기': {
+      searchKeywords: ['글쓰기', '문장론', '보고서 작성', '논문작성'],
+      callNumberPrefixes: ['808'],
+    },
+    '코딩': {
+      searchKeywords: ['코딩', '프로그래밍', '파이썬', '자료구조'],
+      callNumberPrefixes: ['005.1', '005.13'],
+    },
+  };
+
+  const matchedKnowledge = DOMAIN_KNOWLEDGE_MAP[cleanQ];
+  if (matchedKnowledge) {
+    Object.assign(defaultResult, matchedKnowledge);
+  }
+
   const geminiApiKey = process.env.GEMINI_API_KEY;
   if (!geminiApiKey || !cleanQ) {
     return defaultResult;
@@ -944,13 +979,27 @@ function fallbackHeuristicCuration(
 
     // YES24 SalesPoint weighting (Bestsellers & Steadysellers get massive boost)
     const salesPoint = item.aladin.salesPoint || 0;
-    if (salesPoint >= 50000) score += 45; // Mega bestseller (e.g. 한강 소설)
-    else if (salesPoint >= 20000) score += 30;
-    else if (salesPoint >= 10000) score += 15;
+    if (salesPoint >= 50000) score += 60; // Mega bestseller (e.g. 한강 소설)
+    else if (salesPoint >= 20000) score += 40;
+    else if (salesPoint >= 10000) score += 20;
 
     // Official Bestseller Ranking Badge bonus
     if (item.aladin.rankingBadge?.isBest) {
       score += 40;
+    }
+
+    // Author & Literature Disambiguation: Strongly prioritize books by the requested author
+    const isLiteratureOrAuthor = /한강|김영하|유발|소설|문학|시|에세이|작가/i.test(query);
+    const cleanQ = query.trim().toLowerCase();
+    const itemAuthor = (item.cnu.author || '').toLowerCase();
+    const itemTitle = (item.cnu.title || '').toLowerCase();
+
+    if (isLiteratureOrAuthor) {
+      if (itemAuthor.includes(cleanQ)) {
+        score += 90; // Definite authorship match (e.g. 한강 저자)!
+      } else if (itemTitle.includes(cleanQ) && !itemAuthor.includes(cleanQ)) {
+        score -= 60; // Homonym penalty: Title mentions "한강" but written by someone else!
+      }
     }
 
     // Balanced recency score (capped at 5, NOT unbounded 18 points)
