@@ -178,6 +178,32 @@ export async function recordSearchLog(
 }
 
 /**
+ * Retrieve recent search logs (from Supabase or memory)
+ */
+export async function getRecentSearchLogs(limit = 50): Promise<SearchLogItem[]> {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (supabaseUrl && supabaseKey) {
+    try {
+      const res = await fetch(`${supabaseUrl}/rest/v1/search_logs?select=*&order=created_at.desc&limit=${limit}`, {
+        headers: {
+          apikey: supabaseKey,
+          Authorization: `Bearer ${supabaseKey}`,
+        },
+      });
+      if (res.ok) {
+        return await res.json();
+      }
+    } catch (err) {
+      console.warn('[Supabase SearchLog] Fetch logs failed, falling back to memory:', err);
+    }
+  }
+
+  return [...memorySearchLogs].reverse().slice(0, limit);
+}
+
+/**
  * Register a user push subscription for a checked-out book
  */
 export async function registerPushSubscriber(sub: PushSubscriber): Promise<boolean> {
