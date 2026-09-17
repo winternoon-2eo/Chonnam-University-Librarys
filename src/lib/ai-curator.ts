@@ -55,6 +55,140 @@ export interface QueryAnalysisResult {
 }
 
 /**
+ * Universal DDC / KDC Call Number Prefix Resolver for ALL Academic & Practical Disciplines
+ * Guarantees that every single keyword search ALWAYS triggers same-shelf call number harvesting.
+ */
+export function resolveCallNumberPrefixes(query: string): string[] {
+  const q = query.trim().toLowerCase();
+
+  // 1. 심리학 / 정신의학 / 상담 / 멘탈
+  if (/심리|상담|마음|멘탈|우울|불안|성격|인지|프로이트|아들러|도파민/i.test(q)) {
+    return ['180', '150'];
+  }
+  // 2. 인공지능 / 클로드 / LLM / 생성형
+  if (/클로드|claude|챗gpt|gpt|ai|인공지능|llm|생성형|머신러닝|딥러닝|프롬프트|에이전트|바이브/i.test(q)) {
+    return ['006.3', '005.13'];
+  }
+  // 3. 컴퓨터 / 코딩 / 소프트웨어
+  if (/코딩|파이썬|자바|c언어|프로그래밍|개발|알고리즘|자료구조|소프트웨어|스프링|리액트/i.test(q)) {
+    return ['005.1', '005.13'];
+  }
+  // 4. 지식관리 / 생산성 / 도구
+  if (/옵시디언|노션|메모|생산성|지식관리|기록/i.test(q)) {
+    return ['005.5', '005.1'];
+  }
+  // 5. 자기계발 / 처세 / 습관
+  if (/자기계발|습관|시간관리|동기부여|처세|역행자|원씽|카네기|인간관계/i.test(q)) {
+    return ['325.211', '199.1'];
+  }
+  // 6. 경영 / 마케팅 / 비즈니스
+  if (/경영|마케팅|비즈니스|전략|회계|재무|스타트업|피터\s*드러커/i.test(q)) {
+    return ['325', '658'];
+  }
+  // 7. 경제 / 금융 / 투자 / 주식
+  if (/경제|금융|주식|투자|부동산|재테크|화폐|인플레이션/i.test(q)) {
+    return ['320', '327'];
+  }
+  // 8. 사회과학 / 정치 / 행정
+  if (/정치|외교|행정|사회학|복지|정책/i.test(q)) {
+    return ['340', '330'];
+  }
+  // 9. 법학 / 법률
+  if (/법학|헌법|민법|형법|법률|판례|소송/i.test(q)) {
+    return ['360', '340'];
+  }
+  // 10. 교육학 / 학습법
+  if (/교육|교수법|학습법|공부|학교|수업/i.test(q)) {
+    return ['370'];
+  }
+  // 11. 철학 / 윤리
+  if (/철학|윤리|사상|동양철학|서양철학|논리학/i.test(q)) {
+    return ['100', '160'];
+  }
+  // 12. 역사
+  if (/역사|한국사|세계사|조선|고대사|전쟁사/i.test(q)) {
+    return ['900', '911'];
+  }
+  // 13. 문학 / 소설 / 시
+  if (/문학|소설|시|수필|에세이|작가|한강|김영하/i.test(q)) {
+    return ['813', '800'];
+  }
+  // 14. 글쓰기 / 작문
+  if (/글쓰기|작문|문장|보고서|논문|레포트/i.test(q)) {
+    return ['808'];
+  }
+  // 15. 자연과학 / 수학 / 물리 / 화학 / 생물
+  if (/물리|화학|생물|수학|통계|지구과학|우주/i.test(q)) {
+    return ['410', '420'];
+  }
+  // 16. 의학 / 간호 / 보건
+  if (/의학|간호|보건|약학|해부|질병/i.test(q)) {
+    return ['510', '610'];
+  }
+  // 17. 예술 / 디자인 / 음악 / 미술
+  if (/예술|미술|디자인|음악|사진|영화|건축/i.test(q)) {
+    return ['600', '650'];
+  }
+
+  // Broad Academic Fallback: Generalities / Interdisciplinary (never empty!)
+  return ['000', '300'];
+}
+
+/**
+ * Extract a canonical fingerprint from book title & author
+ * to prevent duplicate editions/copies of the exact same work in recommendations.
+ */
+export function getBookCanonicalKey(title: string, author = ''): string {
+  // 1. Resolve canonical author
+  let cleanAuthor = author
+    .replace(/\([^)]*\)/g, '')
+    .replace(/\[[^\]]*\]/g, '')
+    .replace(/(지음|옮김|저|원작|글|그림|역|외|공저|엮음|편저).*/g, '')
+    .replace(/[^a-zA-Z0-9가-힣]/g, '')
+    .toLowerCase()
+    .trim();
+
+  if (/carnegie|카네기/i.test(cleanAuthor) || /카네기/i.test(title)) cleanAuthor = '카네기';
+  else if (/자청/i.test(cleanAuthor) || /자청/i.test(title)) cleanAuthor = '자청';
+  else if (/한강/i.test(cleanAuthor) || /한강/i.test(title)) cleanAuthor = '한강';
+  else if (/김영하/i.test(cleanAuthor) || /김영하/i.test(title)) cleanAuthor = '김영하';
+  else if (/마틴|martin/i.test(cleanAuthor) || /로버트.*마틴/i.test(title)) cleanAuthor = '로버트마틴';
+
+  // 2. Clean title: remove brackets, parentheses, subtitles, edition labels
+  let cleanTitle = title
+    .replace(/\([^)]*\)/g, '')
+    .replace(/\[[^\]]*\]/g, '')
+    .split(/[:\-=—/]/)[0]
+    .replace(/(개정증보판|개정판|개정\s*\d*판|전면개정판|확장판|완전판|특별판|신장판|\d*판)/gi, '')
+    .replace(/데일\s*카네기|카네기|dale\s*carnegie|carnegie/gi, '')
+    .replace(/자청/gi, '')
+    .replace(/한강/gi, '')
+    .replace(/김영하/gi, '')
+    .replace(/[^a-zA-Z0-9가-힣]/g, '')
+    .toLowerCase()
+    .trim();
+
+  // Core canonical title normalization
+  if (/인간관계론/i.test(cleanTitle)) cleanTitle = '인간관계론';
+  else if (/역행자/i.test(cleanTitle)) cleanTitle = '역행자';
+  else if (/원씽|theonething/i.test(cleanTitle)) cleanTitle = '원씽';
+  else if (/세이노/i.test(cleanTitle)) cleanTitle = '세이노의가르침';
+  else if (/미움받을\s*용기/i.test(cleanTitle)) cleanTitle = '미움받을용기';
+  else if (/클린\s*코드/i.test(cleanTitle)) cleanTitle = '클린코드';
+
+  return `${cleanTitle}_${cleanAuthor}`;
+}
+
+export function getAuthorCanonicalKey(author: string, title = ''): string {
+  if (/carnegie|카네기/i.test(author) || /카네기/i.test(title)) return '카네기';
+  if (/자청/i.test(author) || /자청/i.test(title)) return '자청';
+  if (/한강/i.test(author) || /한강/i.test(title)) return '한강';
+  if (/김영하/i.test(author) || /김영하/i.test(title)) return '김영하';
+  if (/마틴|martin/i.test(author) || /로버트.*마틴/i.test(title)) return '로버트마틴';
+  return author.replace(/[^a-zA-Z0-9가-힣]/g, '').slice(0, 4).toLowerCase().trim() || '저자미상';
+}
+
+/**
  * Intelligent Query Rewriter & Keyword Expansion using Gemini 3.5 Flash
  * Automatically detects typos (e.g. '클롣' -> '클로드'), maps colloquial queries ('코딩 공부' -> '프로그래밍 입문'),
  * derives DDC/KDC call number classification prefixes (e.g. '글쓰기' -> ['808'], '코딩' -> ['005.1', '005.13']),
@@ -65,12 +199,14 @@ export async function analyzeAndExpandQuery(
   intent: 'beginner' | 'practical'
 ): Promise<QueryAnalysisResult> {
   const cleanQ = rawQuery.trim();
+  const resolvedPrefixes = resolveCallNumberPrefixes(cleanQ);
+
   const defaultResult: QueryAnalysisResult = {
     originalQuery: cleanQ,
     correctedQuery: cleanQ,
     isTypo: false,
     searchKeywords: [cleanQ],
-    callNumberPrefixes: [],
+    callNumberPrefixes: resolvedPrefixes,
     explanation: '',
   };
 
@@ -109,8 +245,33 @@ export async function analyzeAndExpandQuery(
     },
     '경영학': {
       searchKeywords: ['경영학', '마케팅', '회계원리', '피터 드러커'],
-      callNumberPrefixes: ['325'],
+      callNumberPrefixes: ['325', '658'],
       explanation: '경영학 기초 원리와 권위 있는 비즈니스 명저 서가를 함께 안내합니다.',
+    },
+    '심리학': {
+      searchKeywords: ['심리학', '미움받을 용기', '프레임', '생각에 관한 생각', '설득의 심리학'],
+      callNumberPrefixes: ['180', '150'],
+      explanation: '전남대 도서관에 소장된 기초 심리학 및 대중적으로 검증된 심리 명저 서가를 함께 탐색합니다.',
+    },
+    '클로드': {
+      searchKeywords: ['클로드', 'claude', '바이브 코딩', 'ai 에이전트', '옵시디언'],
+      callNumberPrefixes: ['006.3', '005.13'],
+      explanation: '앤트로픽 클로드(Claude), 바이브 코딩 및 최신 AI 에이전트 개발 서가를 함께 탐색합니다.',
+    },
+    '인공지능': {
+      searchKeywords: ['인공지능', '머신러닝', '딥러닝', '생성형 ai'],
+      callNumberPrefixes: ['006.3', '005.13'],
+      explanation: '최신 인공지능 및 딥러닝/머신러닝 핵심 서가를 함께 안내합니다.',
+    },
+    '경제학': {
+      searchKeywords: ['경제학', '맨큐의 경제학', '국부론', '자본주의'],
+      callNumberPrefixes: ['320', '327'],
+      explanation: '경제학 원론 및 기초 경제 교양 명저 서가를 함께 안내합니다.',
+    },
+    '옵시디언': {
+      searchKeywords: ['옵시디언', '세컨드 브레인', '제텔카스텐', '생산성'],
+      callNumberPrefixes: ['005.5', '005.1'],
+      explanation: '지식 관리 및 제텔카스텐/세컨드 브레인 생산성 서가를 함께 탐색합니다.',
     },
   };
 
@@ -118,6 +279,7 @@ export async function analyzeAndExpandQuery(
   if (matchedKnowledge) {
     Object.assign(defaultResult, matchedKnowledge);
   }
+
 
   const geminiApiKey = process.env.GEMINI_API_KEY;
   if (!geminiApiKey || !cleanQ) {
@@ -183,8 +345,8 @@ export async function analyzeAndExpandQuery(
           callNumberPrefixes:
             Array.isArray(parsed.callNumberPrefixes) && parsed.callNumberPrefixes.length > 0
               ? parsed.callNumberPrefixes.slice(0, 2)
-              : [],
-          explanation: parsed.explanation || '',
+              : defaultResult.callNumberPrefixes,
+          explanation: parsed.explanation || defaultResult.explanation || '',
         };
       }
     }
@@ -204,12 +366,30 @@ export function screenCandidatePool(
   candidates: RawCandidateBook[],
   maxPool = 15
 ): RawCandidateBook[] {
-  if (candidates.length <= maxPool) {
-    return candidates;
+  // Deduplicate candidates representing the same canonical work (e.g. multiple editions of Carnegie or 자청)
+  const canonicalMap = new Map<string, RawCandidateBook>();
+  for (const cand of candidates) {
+    const key = getBookCanonicalKey(cand.cnu.title, cand.cnu.author);
+    const existing = canonicalMap.get(key);
+    if (!existing) {
+      canonicalMap.set(key, cand);
+    } else {
+      // If new candidate has higher salesPoint, or is available while existing is checked out, keep the better one
+      const candScore = (cand.aladin.salesPoint || 0) + (cand.cnu.isAvailable ? 5000 : 0);
+      const existScore = (existing.aladin.salesPoint || 0) + (existing.cnu.isAvailable ? 5000 : 0);
+      if (candScore > existScore) {
+        canonicalMap.set(key, cand);
+      }
+    }
+  }
+  const deduplicatedCandidates = Array.from(canonicalMap.values());
+
+  if (deduplicatedCandidates.length <= maxPool) {
+    return deduplicatedCandidates;
   }
 
   // 1. Sort by recency to pick newest 5 (2025~2026)
-  const sortedByYear = [...candidates].sort((a, b) => {
+  const sortedByYear = [...deduplicatedCandidates].sort((a, b) => {
     const yearA = parseInt(a.cnu.pubYear, 10) || 0;
     const yearB = parseInt(b.cnu.pubYear, 10) || 0;
     return yearB - yearA;
@@ -218,7 +398,7 @@ export function screenCandidatePool(
   const selectedControlNos = new Set<string>(newest.map((c) => c.cnu.controlNo));
 
   // 2. Sort remaining by salesPoint and rating to pick 10 popular
-  const remaining = candidates.filter((c) => !selectedControlNos.has(c.cnu.controlNo));
+  const remaining = deduplicatedCandidates.filter((c) => !selectedControlNos.has(c.cnu.controlNo));
   remaining.sort((a, b) => {
     const scoreA = (a.aladin.salesPoint || 0) + (a.aladin.rating || 0) * 1000;
     const scoreB = (b.aladin.salesPoint || 0) + (b.aladin.rating || 0) * 1000;
@@ -231,44 +411,89 @@ export function screenCandidatePool(
 
 /**
  * Enforce availability ratio in Top 5:
- * Guarantee at least 3 AVAILABLE books and at most 2 CHECKED_OUT books.
+ * Guarantee at least 3 AVAILABLE books and at most 2 CHECKED_OUT books,
+ * while strictly guaranteeing that all 5 books are distinct canonical works.
  */
 export function enforceAvailabilityRatio(
   curatedItems: CuratedBookItem[],
   allCandidates: RawCandidateBook[]
 ): CuratedBookItem[] {
-  if (curatedItems.length <= 3) return curatedItems;
+  // 1. Deduplicate curatedItems by canonical work key
+  const deduplicatedItems: CuratedBookItem[] = [];
+  const seenCanonicalKeys = new Set<string>();
 
-  const availableItems = curatedItems.filter((item) => item.status === 'AVAILABLE');
-  const checkedOutItems = curatedItems.filter((item) => item.status !== 'AVAILABLE');
+  for (const item of curatedItems) {
+    const key = getBookCanonicalKey(item.title, item.author);
+    if (!seenCanonicalKeys.has(key)) {
+      seenCanonicalKeys.add(key);
+      deduplicatedItems.push(item);
+    }
+  }
+
+  // 2. If deduplication reduced count below 5, fill from allCandidates with unique works
+  if (deduplicatedItems.length < 5) {
+    for (const cand of allCandidates) {
+      const key = getBookCanonicalKey(cand.cnu.title, cand.cnu.author);
+      if (!seenCanonicalKeys.has(key)) {
+        seenCanonicalKeys.add(key);
+        deduplicatedItems.push(
+          formatCuratedItem(cand, deduplicatedItems.length + 1, {
+            badge: cand.aladin.rankingBadge?.isBest ? cand.aladin.rankingBadge.rankingText : '⭐ 추천 도서',
+            recommendReason: `${cand.cnu.author} 저자의 대표작으로, 탄탄한 완성도와 실용성을 겸비한 전남대 소장 도서입니다.`,
+            targetChapter: '제1장 핵심 기초와 적용 전략',
+            solvedProblems: [
+              '전공 및 교양 수업에서 핵심 개념 이해와 학업 과제 해결',
+              '체계적인 학습 가이드를 통해 실전 응용 역량 습득',
+            ],
+          })
+        );
+        if (deduplicatedItems.length >= 5) break;
+      }
+    }
+  }
+
+  if (deduplicatedItems.length <= 3) return deduplicatedItems;
+
+  const availableItems = deduplicatedItems.filter((item) => item.status === 'AVAILABLE');
+  const checkedOutItems = deduplicatedItems.filter((item) => item.status !== 'AVAILABLE');
 
   // If checked out items <= 2, requirement is strictly satisfied!
   if (checkedOutItems.length <= 2) {
-    return curatedItems;
+    return deduplicatedItems.slice(0, 5).map((item, idx) => ({ ...item, rank: idx + 1 }));
   }
 
-  // Keep top 2 checked-out items, replace 3rd+ with available candidates
+  // Keep top 2 checked-out items, replace 3rd+ with available candidates (checking canonical keys)
   const keptCheckedOut = checkedOutItems.slice(0, 2);
-  const currentControlNos = new Set<string>(curatedItems.map((item) => item.id));
+  const activeKeys = new Set<string>([
+    ...availableItems.map((i) => getBookCanonicalKey(i.title, i.author)),
+    ...keptCheckedOut.map((i) => getBookCanonicalKey(i.title, i.author)),
+  ]);
 
-  const availableCandidates = allCandidates.filter(
-    (c) => c.cnu.isAvailable && !currentControlNos.has(c.cnu.controlNo)
+  const replacementCandidates = allCandidates.filter(
+    (c) => c.cnu.isAvailable && !activeKeys.has(getBookCanonicalKey(c.cnu.title, c.cnu.author))
   );
 
   const neededAvailable = 5 - (availableItems.length + keptCheckedOut.length);
-  const replacementCandidates = availableCandidates.slice(0, Math.max(0, neededAvailable));
+  const replacementItems: CuratedBookItem[] = [];
 
-  const replacementItems = replacementCandidates.map((cand) => {
-    return formatCuratedItem(cand, 0, {
-      badge: '✅ 즉시 대출가능 추천',
-      recommendReason: `도서관에 즉시 대출 가능한 상태로 소장되어 있어 당장 학습 및 과제에 활용할 수 있는 서가 추천 도서입니다.`,
-      targetChapter: '제1장 핵심 기초와 적용 전략',
-      solvedProblems: [
-        '당장 도서관에서 대출하여 학업 과제에 즉시 참고',
-        '핵심 챕터를 열람하여 개념 이해 및 문제 해결',
-      ],
-    });
-  });
+  for (const cand of replacementCandidates) {
+    const key = getBookCanonicalKey(cand.cnu.title, cand.cnu.author);
+    if (!activeKeys.has(key)) {
+      activeKeys.add(key);
+      replacementItems.push(
+        formatCuratedItem(cand, 0, {
+          badge: '✅ 즉시 대출가능 추천',
+          recommendReason: `도서관에 즉시 대출 가능한 상태로 소장되어 있어 당장 학습 및 과제에 활용할 수 있는 서가 추천 도서입니다.`,
+          targetChapter: '제1장 핵심 기초와 적용 전략',
+          solvedProblems: [
+            '당장 도서관에서 대출하여 학업 과제에 즉시 참고',
+            '핵심 챕터를 열람하여 개념 이해 및 문제 해결',
+          ],
+        })
+      );
+      if (replacementItems.length >= neededAvailable) break;
+    }
+  }
 
   const merged = [...availableItems, ...keptCheckedOut, ...replacementItems].slice(0, 5);
 
@@ -957,13 +1182,18 @@ function mapAiResultsToCuratedItems(
   candidates: RawCandidateBook[]
 ): CuratedBookItem[] {
   const results: CuratedBookItem[] = [];
+  const seenCanonicalKeys = new Set<string>();
 
-  for (let i = 0; i < Math.min(5, aiResults.length); i++) {
+  for (let i = 0; i < aiResults.length; i++) {
     const aiItem = aiResults[i];
     const candidate = candidates[aiItem.index] || candidates[i];
     if (!candidate) continue;
 
-    results.push(formatCuratedItem(candidate, aiItem.rank || i + 1, {
+    const key = getBookCanonicalKey(candidate.cnu.title, candidate.cnu.author);
+    if (seenCanonicalKeys.has(key)) continue;
+    seenCanonicalKeys.add(key);
+
+    results.push(formatCuratedItem(candidate, results.length + 1, {
       recommendReason: aiItem.recommendReason,
       targetChapter: aiItem.targetChapter,
       badge: aiItem.badge,
@@ -972,6 +1202,8 @@ function mapAiResultsToCuratedItems(
       difficulty: aiItem.difficulty,
       solvedProblems: Array.isArray(aiItem.solvedProblems) ? aiItem.solvedProblems : undefined,
     }));
+
+    if (results.length >= 5) break;
   }
 
   return results;
@@ -1040,9 +1272,38 @@ function fallbackHeuristicCuration(
 
   scored.sort((a, b) => b.score - a.score);
 
-  const top5 = scored.slice(0, 5);
+  const distinctScored: { item: RawCandidateBook; score: number }[] = [];
+  const seenCanonicalKeys = new Set<string>();
+  const seenAuthors = new Set<string>();
+  const isAuthorSpecificSearch = /한강|김영하|유발|소설|문학|시|에세이|작가/i.test(query);
 
-  return top5.map((entry, idx) => {
+  // Pass 1: Distinct works with diverse authors
+  for (const entry of scored) {
+    const key = getBookCanonicalKey(entry.item.cnu.title, entry.item.cnu.author);
+    const authorKey = getAuthorCanonicalKey(entry.item.cnu.author, entry.item.cnu.title);
+
+    if (seenCanonicalKeys.has(key)) continue;
+    if (!isAuthorSpecificSearch && seenAuthors.has(authorKey)) continue;
+
+    seenCanonicalKeys.add(key);
+    seenAuthors.add(authorKey);
+    distinctScored.push(entry);
+    if (distinctScored.length >= 5) break;
+  }
+
+  // Pass 2: Fill remaining up to 5 with distinct canonical works if author cap was too strict
+  if (distinctScored.length < 5) {
+    for (const entry of scored) {
+      const key = getBookCanonicalKey(entry.item.cnu.title, entry.item.cnu.author);
+      if (!seenCanonicalKeys.has(key)) {
+        seenCanonicalKeys.add(key);
+        distinctScored.push(entry);
+        if (distinctScored.length >= 5) break;
+      }
+    }
+  }
+
+  return distinctScored.map((entry, idx) => {
     const { item } = entry;
     const rank = idx + 1;
 

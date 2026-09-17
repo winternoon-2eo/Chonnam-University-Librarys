@@ -231,7 +231,7 @@ export async function searchCnuLibraryByCallNo(
   const {
     campus = 'gwangju',
     maxResults = 30,
-    fromYear = 2022,
+    fromYear = 0,
     cpp = 50,
   } = options;
 
@@ -240,7 +240,9 @@ export async function searchCnuLibraryByCallNo(
     if (!cleanPrefix) return [];
 
     const campusParam = campus === 'yeosu' ? '&bk_2=jttjvyjttj' : '';
-    const searchUrl = `https://lib.jnu.ac.kr/search/tot/result?pn=1&st=KWRD&si=6&q=${encodeURIComponent(cleanPrefix + '*')}&bk_0=jttjmjttj&bk_rf=${fromYear}&cpp=${cpp}${campusParam}`;
+    const yearFilter = fromYear > 0 ? `&bk_rf=${fromYear}` : '';
+    const searchUrl = `https://lib.jnu.ac.kr/search/tot/result?pn=1&st=KWRD&si=6&q=${encodeURIComponent(cleanPrefix + '*')}&bk_0=jttjmjttj${yearFilter}&cpp=${cpp}${campusParam}`;
+
 
     const res = await fetchWithRetry(searchUrl, 2);
     if (res.status !== 200) return [];
