@@ -117,7 +117,25 @@ export async function fetchYes24Reviews(goodsNo: string): Promise<Yes24Review[]>
   }
 }
 
-export async function fetchYes24BookInfo(isbn: string, fallbackTitle = ''): Promise<Yes24BookInfo | null> {
+export async function enrichBookWithYes24Community(
+  goodsNo: string
+): Promise<{ rankingBadge?: { isBest: boolean; rankingText: string }; reviews?: Yes24Review[] }> {
+  if (!goodsNo) return {};
+  const [rankRes, reviewRes] = await Promise.allSettled([
+    fetchYes24Ranking(goodsNo),
+    fetchYes24Reviews(goodsNo),
+  ]);
+  return {
+    rankingBadge: rankRes.status === 'fulfilled' && rankRes.value ? rankRes.value : undefined,
+    reviews: reviewRes.status === 'fulfilled' && reviewRes.value ? reviewRes.value : [],
+  };
+}
+
+export async function fetchYes24BookInfo(
+  isbn: string,
+  fallbackTitle = '',
+  includeCommunity = false
+): Promise<Yes24BookInfo | null> {
   const apiKey = process.env.YES24_API_KEY;
   if (!apiKey) {
     return null;
@@ -137,7 +155,7 @@ export async function fetchYes24BookInfo(isbn: string, fallbackTitle = ''): Prom
         'X-Api-Key': apiKey,
         'Accept': 'application/json',
       },
-      signal: AbortSignal.timeout(3000), // 3 second fast timeout
+      signal: AbortSignal.timeout(2500), // 2.5 second fast-fail timeout
       next: { revalidate: 86400 }, // Cache for 24 hours
     });
 
@@ -164,14 +182,11 @@ export async function fetchYes24BookInfo(isbn: string, fallbackTitle = ''): Prom
     let rankingBadge: { isBest: boolean; rankingText: string } | null = null;
     let reviews: Yes24Review[] = [];
 
-    // Parallel fetch ranking badge and reviews if goodsNo exists
-    if (goodsNo) {
-      const [rankRes, reviewRes] = await Promise.allSettled([
-        fetchYes24Ranking(goodsNo),
-        fetchYes24Reviews(goodsNo),
-      ]);
-      if (rankRes.status === 'fulfilled') rankingBadge = rankRes.value;
-      if (reviewRes.status === 'fulfilled') reviews = reviewRes.value;
+    // Fetch ranking badge and reviews only when explicitly requested (Two-Phase Lazy Enrichment)
+    if (includeCommunity && goodsNo) {
+      const comm = await enrichBookWithYes24Community(goodsNo);
+      rankingBadge = comm.rankingBadge || null;
+      reviews = comm.reviews || [];
     }
 
     return {

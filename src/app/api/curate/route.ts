@@ -7,7 +7,8 @@ import {
   CnuBookDetail,
   CampusType,
 } from '@/lib/cnu-library';
-import { fetchUnifiedBookMetadata } from '@/lib/bookstore';
+import { fetchUnifiedBookMetadata, BookstoreMetadata } from '@/lib/bookstore';
+import { enrichBookWithYes24Community } from '@/lib/yes24';
 import {
   curateTop5Books,
   analyzeAndExpandQuery,
@@ -19,21 +20,47 @@ import { getCachedCurateResult, setCachedCurateResult } from '@/lib/supabase';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
+// Layer 2 Defense: SingleFlight Request Coalescing
+// Prevents duplicate queries (e.g. 50 students searching "경영학" simultaneously) from hammering external APIs
+const inFlightRequests = new Map<string, Promise<NextResponse>>();
+
 export async function GET(request: NextRequest) {
+  const { searchParams } = new URL(request.url);
+  const query = (searchParams.get('q') || '').trim();
+  const intent = (searchParams.get('intent') || 'beginner') as 'beginner' | 'practical';
+  const campus = (searchParams.get('campus') || 'gwangju') as CampusType;
+  const availableOnly = searchParams.get('availableOnly') === 'true';
+
+  if (!query) {
+    return NextResponse.json(
+      { error: '검색어를 입력해주세요. (예: 글쓰기, 바이브코딩, 시간관리)' },
+      { status: 400 }
+    );
+  }
+
+  const flightKey = `${query.toLowerCase()}_${intent}_${campus}_${availableOnly}`;
+  const existingFlight = inFlightRequests.get(flightKey);
+  if (existingFlight) {
+    return existingFlight.then((res) => res.clone());
+  }
+
+  const executionPromise = processCurateRequest(query, intent, campus, availableOnly);
+  inFlightRequests.set(flightKey, executionPromise);
+
   try {
-    const { searchParams } = new URL(request.url);
-    const query = (searchParams.get('q') || '').trim();
-    const intent = (searchParams.get('intent') || 'beginner') as 'beginner' | 'practical';
-    const campus = (searchParams.get('campus') || 'gwangju') as CampusType;
-    const availableOnly = searchParams.get('availableOnly') === 'true';
+    return await executionPromise;
+  } finally {
+    inFlightRequests.delete(flightKey);
+  }
+}
 
-    if (!query) {
-      return NextResponse.json(
-        { error: '검색어를 입력해주세요. (예: 글쓰기, 바이브코딩, 시간관리)' },
-        { status: 400 }
-      );
-    }
-
+async function processCurateRequest(
+  query: string,
+  intent: 'beginner' | 'practical',
+  campus: CampusType,
+  availableOnly: boolean
+): Promise<NextResponse> {
+  try {
     // 1. Check 2-tier cache (with campus awareness)
     const cachedData = await getCachedCurateResult(query, intent, campus);
     if (cachedData && Array.isArray(cachedData) && cachedData.length > 0) {
@@ -131,36 +158,24 @@ export async function GET(request: NextRequest) {
 
     const screenedCnuList = [...newestCandidates, ...remainingCandidates.slice(0, 10)];
 
-    // 5. Batch-controlled Concurrency Enrichment (Layer 2 Defense: Prevents 429 rate limit & protects metadata)
+    // 5. Phase 1 Fast Enrichment: Basic metadata without reviews/ranking scraping (~1.2s total)
     const enrichedCandidates: RawCandidateBook[] = [];
-    const BATCH_SIZE = 3;
-    const DELAY_MS = 80;
+    const BATCH_SIZE = 5;
+    const DELAY_MS = 30;
 
     for (let i = 0; i < screenedCnuList.length; i += BATCH_SIZE) {
       const batch = screenedCnuList.slice(i, i + BATCH_SIZE);
       const batchResults = await Promise.all(
         batch.map(async (cnuItem) => {
           try {
-            const [detail, bookstoreInfo] = await Promise.all([
-              getCnuBookDetail(cnuItem.controlNo, campus).catch(() => ({} as Partial<CnuBookDetail>)),
-              fetchUnifiedBookMetadata(cnuItem.isbn || '', cnuItem.title).catch(() => null),
-            ]);
-
-            const mergedCnu = {
-              ...cnuItem,
-              ...detail,
-              isbn: detail.isbn || cnuItem.isbn || '',
-              callNumber: detail.callNumber || cnuItem.callNumber || '005.1 C623',
-              location: detail.location || cnuItem.location || (campus === 'yeosu' ? '여수캠퍼스도서관' : '중앙도서관[정보마루]'),
-              isAvailable: detail.isAvailable !== undefined ? detail.isAvailable : cnuItem.isAvailable,
-            };
+            const bookstoreInfo = await fetchUnifiedBookMetadata(cnuItem.isbn || '', cnuItem.title, false).catch(() => null);
 
             const finalBookstore = bookstoreInfo || {
-              isbn: mergedCnu.isbn,
-              title: mergedCnu.title,
-              author: mergedCnu.author,
-              publisher: mergedCnu.publisher,
-              coverUrl: mergedCnu.coverUrl,
+              isbn: cnuItem.isbn || '',
+              title: cnuItem.title,
+              author: cnuItem.author,
+              publisher: cnuItem.publisher,
+              coverUrl: cnuItem.coverUrl,
               rating: 9.5,
               salesPoint: 20000,
               toc: '',
@@ -169,7 +184,7 @@ export async function GET(request: NextRequest) {
             };
 
             return {
-              cnu: mergedCnu,
+              cnu: cnuItem,
               aladin: finalBookstore,
             } as RawCandidateBook;
           } catch (err) {
@@ -195,12 +210,51 @@ export async function GET(request: NextRequest) {
       enrichedCandidates
     );
 
-    // 7. Store in 2-tier cache
-    await setCachedCurateResult(query, intent, top5Books, campus);
+    // 7. Phase 2 Targeted Deep Enrichment: Parallelize detail & official ranking/reviews for Top 5 ONLY (~0.8s)
+    const finalizedTop5 = await Promise.all(
+      top5Books.map(async (book) => {
+        try {
+          const matchingCand = enrichedCandidates.find((c) => c.cnu.controlNo === book.id);
+          const goodsNo = (matchingCand?.aladin as BookstoreMetadata)?.goodsNo;
 
-    let resultBooks = top5Books;
+          const [cnuDetailRes, yes24CommRes] = await Promise.allSettled([
+            getCnuBookDetail(book.id, campus),
+            goodsNo ? enrichBookWithYes24Community(goodsNo) : Promise.resolve(null),
+          ]);
+
+          const updated = { ...book };
+
+          if (cnuDetailRes.status === 'fulfilled' && cnuDetailRes.value) {
+            const d = cnuDetailRes.value;
+            if (d.location) updated.location = d.location;
+            if (d.callNumber) updated.callNumber = d.callNumber;
+            if (d.isAvailable !== undefined) {
+              updated.status = d.isAvailable ? 'AVAILABLE' : 'CHECKED_OUT';
+            }
+          }
+
+          if (yes24CommRes.status === 'fulfilled' && yes24CommRes.value) {
+            const comm = yes24CommRes.value;
+            if (comm?.rankingBadge) updated.rankingBadge = comm.rankingBadge;
+            if (comm?.reviews && comm.reviews.length > 0) updated.reviews = comm.reviews;
+          }
+
+          return updated;
+        } catch {
+          return book;
+        }
+      })
+    );
+
+    // Ensure Availability Ratio Guarantee remains strictly applied
+    const guaranteedBooks = enforceAvailabilityRatio(finalizedTop5, enrichedCandidates);
+
+    // 8. Store in 2-tier cache
+    await setCachedCurateResult(query, intent, guaranteedBooks, campus);
+
+    let resultBooks = guaranteedBooks;
     if (availableOnly) {
-      resultBooks = top5Books.filter((b) => b.status === 'AVAILABLE');
+      resultBooks = guaranteedBooks.filter((b) => b.status === 'AVAILABLE');
     }
 
     return NextResponse.json({

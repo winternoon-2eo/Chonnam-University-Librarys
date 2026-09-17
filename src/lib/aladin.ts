@@ -8,6 +8,11 @@ export interface AladinBookInfo {
   salesPoint: number;     // 판매지수 (예: 24500)
   toc: string;            // 상세 목차
   description: string;    // 책 소개 요약
+  rankingBadge?: {
+    isBest: boolean;
+    rankingText: string;
+  };
+  reviews?: any[];
 }
 
 /**

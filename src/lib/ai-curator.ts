@@ -83,8 +83,14 @@ export async function analyzeAndExpandQuery(
     const model = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
     const prompt = `
 당신은 전남대학교 도서관 검색 시스템의 'AI 쿼리 분석 및 확장 엔진'입니다.
-사용자가 입력한 검색어는 오탈자(예: "클롣" -> "클로드"), 구어체/자연어(예: "코딩 공부"), 특정 소프트웨어/도구명(예: "옵시디언"), 또는 개발 안티패턴(예: "하드 코딩")일 수 있습니다.
+사용자가 입력한 검색어는 특정 소설가/학자/인물명(예: "한강", "유발 하라리"), 오탈자(예: "클롣" -> "클로드"), 구어체/자연어(예: "코딩 공부"), 특정 도구명(예: "옵시디언")일 수 있습니다.
 대학 도서관 서명 검색(단순 키워드 매칭) 및 사서 십진분류 청구기호(DDC/KDC) 서가 탐색에서 가장 우수하고 실질적인 소장 도서를 많이 발굴할 수 있도록 분석해 주세요.
+
+[중요 규칙]:
+1. 만약 검색어가 특정 소설가/작가/인물(예: "한강", "김영하")인 경우:
+   - 도서관 서명 검색에서 실제 작가의 명저가 검색될 수 있도록 searchKeywords에 작가 이름과 함께 그 작가의 유명 대표작 도서명 2~3개(예: ["한강", "소년이 온다", "작별하지 않는다", "채식주의자"])를 반드시 포함하세요.
+   - callNumberPrefixes에는 해당 문학/학문 분류기호(예: 한국소설 -> ["813"])를 반드시 지정하세요.
+2. 오탈자가 있으면 올바르게 교정하세요.
 
 [사용자 입력 검색어]: "${cleanQ}"
 [사용자 학습 목적]: ${intent === 'beginner' ? '입문/교양 (기초, 첫걸음)' : '실무/실습 (실전, 심화)'}
@@ -93,8 +99,8 @@ export async function analyzeAndExpandQuery(
 {
   "correctedQuery": string (오탈자가 있으면 바르게 교정한 단어, 없으면 원본 단어),
   "isTypo": boolean (오탈자가 있었는지 여부),
-  "searchKeywords": string[] (대학 도서관 OPAC에서 소장 도서를 검색할 최적의 핵심 단어 2~3개. 첫 번째는 교정된 검색어여야 함. 예: ["클로드", "생성형 AI"], ["옵시디언", "제텔카스텐", "메모"], ["파이썬", "프로그래밍 입문"]),
-  "callNumberPrefixes": string[] (이 학문/실무 영역에 해당하는 대학 도서관 DDC/KDC 분류번호 1~2개. 예: 컴퓨터/코딩 -> ["005.1", "005.13"], 인공지능 -> ["006.3"], 글쓰기/작문 -> ["808"], 자기계발/생산성 -> ["325", "199"], 경제/경영 -> ["320", "330"]),
+  "searchKeywords": string[] (대학 도서관 OPAC에서 소장 도서를 검색할 최적의 핵심 단어 2~4개. 작가 이름인 경우 대표작 도서명 포함),
+  "callNumberPrefixes": string[] (이 학문/실무 영역에 해당하는 대학 도서관 DDC/KDC 분류번호 1~2개. 예: 문학/한국소설 -> ["813"], 컴퓨터/코딩 -> ["005.1", "005.13"], 인공지능 -> ["006.3"], 글쓰기/작문 -> ["808"], 자기계발/생산성 -> ["325", "199"]),
   "explanation": string (오탈자가 교정되었거나, 연관 지식 영역으로 확장되었을 때 사용자에게 친절하게 보여줄 1문장의 안내 문구. 변화가 없으면 빈 문자열 "")
 }
 `;
@@ -931,22 +937,35 @@ function fallbackHeuristicCuration(
   intent: 'beginner' | 'practical',
   candidates: RawCandidateBook[]
 ): CuratedBookItem[] {
-  // Sort candidates by relevance score
+  // Sort candidates by relevance and bestseller proof
   const scored = candidates.map((item) => {
     let score = (item.aladin.rating || 9.0) * 10;
-    const year = parseInt(item.cnu.pubYear, 10) || 2020;
-    score += (year - 2020) * 3;
 
-    const toc = item.aladin.toc.toLowerCase();
-    const title = item.cnu.title.toLowerCase();
+    // YES24 SalesPoint weighting (Bestsellers & Steadysellers get massive boost)
+    const salesPoint = item.aladin.salesPoint || 0;
+    if (salesPoint >= 50000) score += 45; // Mega bestseller (e.g. 한강 소설)
+    else if (salesPoint >= 20000) score += 30;
+    else if (salesPoint >= 10000) score += 15;
+
+    // Official Bestseller Ranking Badge bonus
+    if (item.aladin.rankingBadge?.isBest) {
+      score += 40;
+    }
+
+    // Balanced recency score (capped at 5, NOT unbounded 18 points)
+    const year = parseInt(item.cnu.pubYear, 10) || 2020;
+    if (year >= 2024) score += 5;
+
+    const toc = (item.aladin.toc || '').toLowerCase();
+    const title = (item.cnu.title || '').toLowerCase();
 
     if (intent === 'beginner') {
       if (toc.includes('기초') || toc.includes('입문') || toc.includes('시작') || title.includes('혼자') || title.includes('쉬운') || title.includes('이해')) {
-        score += 30;
+        score += 25;
       }
     } else {
       if (toc.includes('실전') || toc.includes('고급') || toc.includes('아키텍처') || toc.includes('배포') || title.includes('실무') || title.includes('마스터')) {
-        score += 30;
+        score += 25;
       }
     }
 
@@ -966,17 +985,21 @@ function fallbackHeuristicCuration(
     const rank = idx + 1;
 
     let badge = '🏆 추천 도서';
-    if (rank === 1) badge = intent === 'beginner' ? '🌱 입문 최우수' : '⚡ 실전 필독 1위';
+    if (item.aladin.rankingBadge?.isBest) badge = item.aladin.rankingBadge.rankingText;
+    else if (rank === 1) badge = intent === 'beginner' ? '🌱 입문 최우수' : '⚡ 실전 필독 1위';
     else if (item.aladin.rating >= 9.5) badge = `⭐ 평점 ${item.aladin.rating}점`;
     else if (item.cnu.isAvailable) badge = '✅ 즉시 대출가능';
     else badge = '📚 핵심 필독서';
 
-    const lines = item.aladin.toc.split('\n').filter(Boolean);
+    const lines = (item.aladin.toc || '').split('\n').filter(Boolean);
     const targetChapter = lines[Math.min(2, lines.length - 1)] || '제1장 핵심 기초와 적용 전략';
 
     let recommendReason = '';
-    if (intent === 'beginner') {
-      recommendReason = `어려운 학술 전문 용어 대신 친숙한 비유와 직관적인 구성으로 개념을 풀어내어 '${query}' 분야를 처음 시작하는 전남대 학우에게 최상의 출발점을 제공합니다. [${targetChapter}]를 먼저 읽으시면 흐름이 한눈에 잡힙니다.`;
+    const isLiteratureOrAuthor = /한강|소설|문학|시|에세이|작가/i.test(query);
+    if (isLiteratureOrAuthor) {
+      recommendReason = `독자들의 깊은 공감과 찬사를 받은 검증된 작품으로, 섬세한 문장과 밀도 있는 서사를 통해 '${query}' 관련 추천 도서 중 가장 완성도 높은 독서 경험을 선사합니다. [${targetChapter}] 파트부터 읽어보시기를 추천합니다.`;
+    } else if (intent === 'beginner') {
+      recommendReason = `어려운 학술 전문 용어 대신 친숙한 비유와 직관적인 구성으로 개념을 풀어내어 '${query}' 주제를 처음 접하는 전남대 학우에게 최상의 출발점을 제공합니다. [${targetChapter}]를 먼저 읽으시면 흐름이 한눈에 잡힙니다.`;
     } else {
       recommendReason = `현업과 일상에서 맞닥뜨리는 실전 문제 해결 패턴과 테크닉을 상세 목차 전반에 걸쳐 밀도 있게 다룹니다. 특히 [${targetChapter}] 파트는 즉시 과제나 개인 프로젝트에 이식할 수 있어 강력 추천합니다.`;
     }

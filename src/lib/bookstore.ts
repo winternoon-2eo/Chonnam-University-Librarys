@@ -29,12 +29,13 @@ export interface BookstoreMetadata {
  */
 export async function fetchUnifiedBookMetadata(
   isbn: string,
-  fallbackTitle = ''
+  fallbackTitle = '',
+  includeCommunity = false
 ): Promise<BookstoreMetadata> {
   // 1. Try YES24 (Primary)
   if (process.env.YES24_API_KEY) {
     try {
-      const yes24Data = await fetchYes24BookInfo(isbn, fallbackTitle);
+      const yes24Data = await fetchYes24BookInfo(isbn, fallbackTitle, includeCommunity);
       if (yes24Data && (yes24Data.toc || yes24Data.rating)) {
         return {
           ...yes24Data,
